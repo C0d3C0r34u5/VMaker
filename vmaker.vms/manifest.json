@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "brett.vms",
+  "id": "vmaker.vms",
   "name": "Virtual Machines",
   "version": "0.1.0",
-  "author": "brett",
+  "author": "VMaker",
   "license": "MIT",
   "description": "List and start/stop libvirt VMs (created by vmaker) from the bar via virsh on qemu:///system.",
   "kinds": ["service", "bar-widget"],

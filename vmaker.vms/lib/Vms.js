@@ -1,4 +1,4 @@
-// VM list parsing and helpers for the brett.vms plugin.
+// VM list parsing and helpers for the vmaker.vms plugin.
 //
 // Pure and I/O-free: imported by Service.qml and required by tests/vms.test.js.
 // Nothing here runs a process or reads the clock; Service.qml owns the virsh

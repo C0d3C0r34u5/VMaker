@@ -8,9 +8,9 @@ import qs.Commons
 // next poll. The glyph/count light up in the accent color when any VM is on.
 BarWidget {
   id: root
-  moduleName: "brett.vms"
+  moduleName: "vmaker.vms"
 
-  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("brett.vms") : null
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("vmaker.vms") : null
 
   readonly property int onCount: service ? service.onCount : 0
   readonly property string tooltip: service ? service.summary : "Virtual machines"
@@ -48,7 +48,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "brett.vms"
+    target: "vmaker.vms"
 
     function status(): string {
       return root.service ? root.service.summary : "VM service is not running"

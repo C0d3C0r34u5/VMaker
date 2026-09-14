@@ -6,7 +6,7 @@ widget to list and start/stop your VMs.
 | Path | What it is |
 |------|-----------|
 | `vmaker` | Interactive CLI that creates VMs (asks OS, name, ISO, CPU, RAM, disk) |
-| `brett.vms/` | An Omarchy shell plugin: bar widget + panel to list/start/stop VMs |
+| `vmaker.vms/` | An Omarchy shell plugin: bar widget + panel to list/start/stop VMs |
 | `vmakerSetup.sh` | One-shot installer for QEMU/libvirt, vmaker, and the plugin |
 
 ## Requirements
@@ -27,14 +27,14 @@ cd VMaker
 This installs QEMU, libvirt, and their dependencies, enables `libvirtd`,
 starts the default NAT network, adds your user to the `libvirt` and `kvm`
 groups, installs `vmaker` to `~/.local/bin`, and installs + enables the
-`brett.vms` bar widget.
+`vmaker.vms` bar widget.
 
 When it finishes, **log out and back in** so the new group membership takes
 effect, then run `vmaker` to create your first VM.
 
 ### Running vmakerSetup.sh after the plugin is already installed
 
-If `brett.vms` is already in `~/.config/omarchy/plugins/` (you copied it,
+If `vmaker.vms` is already in `~/.config/omarchy/plugins/` (you copied it,
 or installed it through a plugin manager), you still need the system pieces
 — QEMU, libvirt, and the `vmaker` helper. Clone the repo and run the same
 setup script:
@@ -49,7 +49,7 @@ The script is idempotent, so running it again is safe:
 
 - already-installed packages are skipped (`pacman --needed`)
 - `libvirtd` and the default network are just re-enabled
-- re-copying `brett.vms` over itself is harmless
+- re-copying `vmaker.vms` over itself is harmless
 - your user is only added to the groups if missing
 
 After it finishes, log out and back in.
@@ -58,9 +58,9 @@ After it finishes, log out and back in.
 
 ```bash
 mkdir -p ~/.config/omarchy/plugins
-cp -r brett.vms ~/.config/omarchy/plugins/
+cp -r vmaker.vms ~/.config/omarchy/plugins/
 omarchy-shell shell rescanPlugins
-omarchy plugin enable brett.vms
+omarchy plugin enable vmaker.vms
 ```
 
 You'll still need QEMU/libvirt and `vmaker` for VMs to actually work — see
@@ -82,7 +82,7 @@ six things:
 3. Starts and autostarts the default NAT network (`virbr0`)
 4. Adds your user to the `libvirt` and `kvm` groups
 5. Creates `~/Myvms` and grants the qemu process access to it (POSIX ACLs)
-6. Installs `vmaker` to `~/.local/bin` and `brett.vms` into the shell
+6. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell
 
 ## Creating a VM
 
@@ -108,7 +108,7 @@ virt-viewer <name>     # view a running VM
 
 ## The bar widget
 
-Once installed, `brett.vms` shows a computer glyph plus the running count in
+Once installed, `vmaker.vms` shows a computer glyph plus the running count in
 the right section of the bar.
 
 - **Left-click** — open the panel (list VMs, start / shutdown / force-stop)
@@ -118,9 +118,9 @@ the right section of the bar.
 Manage it with:
 
 ```bash
-omarchy plugin disable brett.vms
-omarchy plugin enable  brett.vms
-omarchy-shell brett.vms status
+omarchy plugin disable vmaker.vms
+omarchy plugin enable  vmaker.vms
+omarchy-shell vmaker.vms status
 ```
 
 ## Notes

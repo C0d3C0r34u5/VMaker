@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# vmakerSetup.sh — install and configure vmaker + the brett.vms Omarchy plugin
+# vmakerSetup.sh — install and configure vmaker + the vmaker.vms Omarchy plugin
 #
 # Does everything needed to create and manage QEMU/KVM VMs on Arch/Omarchy:
 #   1. Installs QEMU, libvirt, and their dependencies (pacman, via sudo)
@@ -9,7 +9,7 @@ set -euo pipefail
 #   3. Adds the current user to the libvirt and kvm groups
 #   4. Grants the libvirt qemu process access to ~/Myvms (VM disks)
 #   5. Installs the vmaker script to ~/.local/bin
-#   6. Installs the brett.vms plugin and enables it in the Omarchy bar
+#   6. Installs the vmaker.vms plugin and enables it in the Omarchy bar
 #
 # Usage:
 #   ./vmakerSetup.sh              # install for real
@@ -35,7 +35,7 @@ run() {
 }
 
 # Directory this script lives in (the VMaker repo root, alongside vmaker and
-# the brett.vms plugin directory).
+# the vmaker.vms plugin directory).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The user we are installing for (also correct when run via sudo).
@@ -56,10 +56,10 @@ command -v pacman >/dev/null 2>&1 || err "this script needs pacman (Arch/Omarchy
 command -v sudo   >/dev/null 2>&1 || err "this script needs sudo"
 [[ -n "$TARGET_HOME" ]] || err "could not resolve a home directory for '$TARGET_USER'"
 [[ -f "$SCRIPT_DIR/vmaker" ]] || err "vmaker script not found next to $0"
-[[ -d "$SCRIPT_DIR/brett.vms" ]] || err "brett.vms plugin directory not found next to $0"
+[[ -d "$SCRIPT_DIR/vmaker.vms" ]] || err "vmaker.vms plugin directory not found next to $0"
 
 echo ""
-info "vmakerSetup — installing vmaker + brett.vms for '$TARGET_USER'"
+info "vmakerSetup — installing vmaker + vmaker.vms for '$TARGET_USER'"
 [[ $DRY_RUN -eq 1 ]] && warn "dry run: nothing will be changed"
 echo ""
 
@@ -112,14 +112,14 @@ else
 fi
 
 # ---------- 6. vmaker + plugin ----------
-info "6/6  Installing vmaker and the brett.vms plugin..."
+info "6/6  Installing vmaker and the vmaker.vms plugin..."
 BIN_DIR="$TARGET_HOME/.local/bin"
-PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/brett.vms"
+PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
 
 run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DIR/vmaker"
 run rm -rf "$PLUGIN_DST"
 run mkdir -p "$(dirname "$PLUGIN_DST")"
-run cp -R "$SCRIPT_DIR/brett.vms" "$PLUGIN_DST"
+run cp -R "$SCRIPT_DIR/vmaker.vms" "$PLUGIN_DST"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -130,13 +130,13 @@ esac
 if command -v omarchy-shell >/dev/null 2>&1 && command -v omarchy >/dev/null 2>&1; then
   if [[ $DRY_RUN -eq 0 ]]; then
     omarchy-shell shell rescanPlugins 2>/dev/null || warn "could not rescan plugins (is omarchy-shell running?)"
-    omarchy plugin enable brett.vms 2>/dev/null || warn "could not enable brett.vms (enable it manually)"
+    omarchy plugin enable vmaker.vms 2>/dev/null || warn "could not enable vmaker.vms (enable it manually)"
   else
     run omarchy-shell shell rescanPlugins
-    run omarchy plugin enable brett.vms
+    run omarchy plugin enable vmaker.vms
   fi
 else
-  warn "omarchy commands not found — enable the plugin manually with: omarchy plugin enable brett.vms"
+  warn "omarchy commands not found — enable the plugin manually with: omarchy plugin enable vmaker.vms"
 fi
 
 # ---------- done ----------
@@ -146,6 +146,6 @@ echo ""
 echo "Next steps:"
 echo "  1. Log out and back in so the libvirt/kvm group membership takes effect."
 echo "  2. Run 'vmaker' to create a VM."
-echo "  3. The VMs widget (brett.vms) should now be in the bar's right section."
+echo "  3. The VMs widget (vmaker.vms) should now be in the bar's right section."
 echo ""
 [[ $DRY_RUN -eq 1 ]] && warn "This was a dry run — nothing was changed."

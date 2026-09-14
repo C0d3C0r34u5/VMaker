@@ -7,13 +7,13 @@ import qs.Commons
 // source of truth shared with the bar and the IPC surface.
 Panel {
   id: root
-  moduleName: "brett.vms"
+  moduleName: "vmaker.vms"
 
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("brett.vms") : null
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("vmaker.vms") : null
 
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
