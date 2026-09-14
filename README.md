@@ -62,8 +62,17 @@ Because `manifest.json` sits at the repo root, you can add it directly:
 omarchy plugin add https://github.com/C0d3C0r34u5/VMaker.git --enable --yes
 ```
 
-You'll still need QEMU/libvirt and `vmaker` for VMs to actually work — see
-the setup script above.
+> ⚠️ **The plugin is just the bar widget** — it needs QEMU/libvirt to do
+> anything, so it will show "Unavailable" until those are installed. After
+> installing, run the bundled setup script (it's included in the plugin
+> directory):
+>
+> ```bash
+> ~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh
+> ```
+>
+> then **log out and back in**. That installs QEMU/libvirt, `vmaker`, and
+> configures everything.
 
 ## Running vmakerSetup.sh
 

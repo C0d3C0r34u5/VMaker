@@ -318,6 +318,17 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
+            visible: root.service && root.service.virshMissing === true
+            text: "Set it up with the VMaker installer:\n~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh"
+            color: root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
             visible: root.service && root.service.actionError !== ""
             text: root.service ? root.service.actionError : ""
             color: root.warnColor

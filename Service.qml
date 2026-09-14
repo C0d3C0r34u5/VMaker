@@ -21,6 +21,7 @@ Item {
   property string status: "idle"
   property string error: ""
   property bool busy: false
+  property bool virshMissing: false
   property double lastUpdatedAt: 0
 
   readonly property int totalCount: vms.length
@@ -76,12 +77,38 @@ Item {
 
   function refresh() {
     if (root.busy) return
-    listProc.exitCode = -1
-    listProc.stdoutDone = false
-    listProc.stdoutText = ""
     root.busy = true
     root.status = "loading"
     root.error = ""
+    preflightProc.running = true
+  }
+
+  // ------------------------------------------------------------ preflight
+
+  // Cheap check that the virsh binary exists before we try to run it, so an
+  // install that lacks QEMU/libvirt gets a clear "not installed" message
+  // instead of a confusing "virsh timed out".
+  Process {
+    id: preflightProc
+    command: ["/usr/bin/test", "-x", Vms.VIRSH_BINARY]
+
+    onExited: function(code) {
+      if (code !== 0) {
+        root.virshMissing = true
+        root.busy = false
+        root.status = "error"
+        root.error = Vms.ERROR_LIBVIRT_MISSING
+        return
+      }
+      root.virshMissing = false
+      root.startList()
+    }
+  }
+
+  function startList() {
+    listProc.exitCode = -1
+    listProc.stdoutDone = false
+    listProc.stdoutText = ""
     listProc.running = true
     listWatchdog.restart()
   }
