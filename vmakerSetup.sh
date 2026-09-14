@@ -119,11 +119,20 @@ PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
 PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
 
 run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DIR/vmaker"
-run rm -rf "$PLUGIN_DST"
-run mkdir -p "$PLUGIN_DST"
-for f in "${PLUGIN_FILES[@]}"; do
-  run cp -R "$SCRIPT_DIR/$f" "$PLUGIN_DST/$f"
-done
+
+# If this script is being run from inside the already-installed plugin dir
+# (e.g. `~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh` after
+# `omarchy plugin add`), the plugin files are already in place. Don't `rm -rf`
+# the very directory we're running from.
+if [[ "$SCRIPT_DIR" == "$PLUGIN_DST" ]]; then
+  info "    plugin already installed at $PLUGIN_DST (skipping copy)"
+else
+  run rm -rf "$PLUGIN_DST"
+  run mkdir -p "$PLUGIN_DST"
+  for f in "${PLUGIN_FILES[@]}"; do
+    run cp -R "$SCRIPT_DIR/$f" "$PLUGIN_DST/$f"
+  done
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
