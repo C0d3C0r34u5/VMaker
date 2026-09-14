@@ -34,8 +34,9 @@ run() {
   fi
 }
 
-# Directory this script lives in (the VMaker repo root, alongside vmaker and
-# the vmaker.vms plugin directory).
+# Directory this script lives in (the VMaker repo root). The plugin files
+# (manifest.json, *.qml, lib/) sit alongside this script, so the whole repo is
+# also a valid plugin dir for `omarchy plugin add`.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The user we are installing for (also correct when run via sudo).
@@ -56,7 +57,7 @@ command -v pacman >/dev/null 2>&1 || err "this script needs pacman (Arch/Omarchy
 command -v sudo   >/dev/null 2>&1 || err "this script needs sudo"
 [[ -n "$TARGET_HOME" ]] || err "could not resolve a home directory for '$TARGET_USER'"
 [[ -f "$SCRIPT_DIR/vmaker" ]] || err "vmaker script not found next to $0"
-[[ -d "$SCRIPT_DIR/vmaker.vms" ]] || err "vmaker.vms plugin directory not found next to $0"
+[[ -f "$SCRIPT_DIR/manifest.json" ]] || err "plugin manifest.json not found next to $0"
 
 echo ""
 info "vmakerSetup — installing vmaker + vmaker.vms for '$TARGET_USER'"
@@ -115,11 +116,14 @@ fi
 info "6/6  Installing vmaker and the vmaker.vms plugin..."
 BIN_DIR="$TARGET_HOME/.local/bin"
 PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
+PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
 
 run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DIR/vmaker"
 run rm -rf "$PLUGIN_DST"
-run mkdir -p "$(dirname "$PLUGIN_DST")"
-run cp -R "$SCRIPT_DIR/vmaker.vms" "$PLUGIN_DST"
+run mkdir -p "$PLUGIN_DST"
+for f in "${PLUGIN_FILES[@]}"; do
+  run cp -R "$SCRIPT_DIR/$f" "$PLUGIN_DST/$f"
+done
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

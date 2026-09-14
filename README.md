@@ -5,8 +5,8 @@ widget to list and start/stop your VMs.
 
 | Path | What it is |
 |------|-----------|
+| `manifest.json`, `*.qml`, `lib/` | The `vmaker.vms` plugin (manifest at the repo root) |
 | `vmaker` | Interactive CLI that creates VMs (asks OS, name, ISO, CPU, RAM, disk) |
-| `vmaker.vms/` | An Omarchy shell plugin: bar widget + panel to list/start/stop VMs |
 | `vmakerSetup.sh` | One-shot installer for QEMU/libvirt, vmaker, and the plugin |
 
 ## Requirements
@@ -56,11 +56,10 @@ After it finishes, log out and back in.
 
 ### Install only the plugin (no system changes)
 
+Because `manifest.json` sits at the repo root, you can add it directly:
+
 ```bash
-mkdir -p ~/.config/omarchy/plugins
-cp -r vmaker.vms ~/.config/omarchy/plugins/
-omarchy-shell shell rescanPlugins
-omarchy plugin enable vmaker.vms
+omarchy plugin add https://github.com/C0d3C0r34u5/VMaker.git --enable --yes
 ```
 
 You'll still need QEMU/libvirt and `vmaker` for VMs to actually work — see
