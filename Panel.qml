@@ -78,9 +78,8 @@ Panel {
 
   component VmRow: BorderSurface {
     id: row
-    required property var modelData
+    property var vm: null
 
-    readonly property var vm: row.modelData
     readonly property bool hot: mouse.containsMouse || root.cursor === row.cursorIndex
 
     property int cursorIndex: -1
@@ -289,6 +288,8 @@ Panel {
 
             VmRow {
               required property var modelData
+              required property int index
+              vm: modelData
               cursorIndex: index + 1
             }
           }
