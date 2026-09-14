@@ -7,9 +7,10 @@ set -euo pipefail
 #   1. Installs QEMU, libvirt, and their dependencies (pacman, via sudo)
 #   2. Enables and starts libvirtd and the default NAT network
 #   3. Adds the current user to the libvirt and kvm groups
-#   4. Grants the libvirt qemu process access to ~/Myvms (VM disks)
-#   5. Installs the vmaker script to ~/.local/bin
-#   6. Installs the vmaker.vms plugin and enables it in the Omarchy bar
+#   4. Configures UFW so VMs can reach the internet (forward + DHCP/DNS)
+#   5. Grants the libvirt qemu process access to ~/Myvms (VM disks)
+#   6. Installs the vmaker script to ~/.local/bin
+#   7. Installs the vmaker.vms plugin and enables it in the Omarchy bar
 #
 # Usage:
 #   ./vmakerSetup.sh              # install for real
@@ -65,7 +66,7 @@ info "vmakerSetup — installing vmaker + vmaker.vms for '$TARGET_USER'"
 echo ""
 
 # ---------- 1. packages ----------
-info "1/6  Installing packages (this needs your sudo password)..."
+info "1/7  Installing packages (this needs your sudo password)..."
 if [[ $DRY_RUN -eq 0 ]]; then
   sudo -v || err "sudo authentication failed"
   sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
@@ -74,16 +75,43 @@ else
 fi
 
 # ---------- 2. libvirtd ----------
-info "2/6  Enabling and starting libvirtd..."
+info "2/7  Enabling and starting libvirtd..."
 run sudo systemctl enable --now libvirtd
 
 # ---------- 3. default network ----------
-info "3/6  Starting the default NAT network..."
+info "3/7  Starting the default NAT network..."
 run sudo virsh -c qemu:///system net-start default || warn "default network already active (or not available)"
 run sudo virsh -c qemu:///system net-autostart default
 
-# ---------- 4. groups ----------
-info "4/6  Adding '$TARGET_USER' to the libvirt and kvm groups..."
+# ---------- 4. firewall (UFW) ----------
+# UFW (when active) denies incoming connections and drops forwarded traffic by
+# default. Both break libvirt NAT networking: the guest's DHCP/DNS requests to
+# dnsmasq (bound to virbr0) are dropped as "incoming", and its internet traffic
+# is dropped as "forwarded". Fix both.
+if command -v ufw >/dev/null 2>&1 && grep -qs '^ENABLED=yes' /etc/ufw/ufw.conf; then
+  info "4/7  Configuring UFW for libvirt NAT networking..."
+  # 1) Allow forwarded traffic (libvirt's own nftables rules still filter it).
+  if grep -qs '^DEFAULT_FORWARD_POLICY="DROP"' /etc/default/ufw; then
+    run sudo sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+  fi
+  # 2) Allow incoming DHCP + DNS (and other host services) from the guest bridge.
+  if [[ $DRY_RUN -eq 0 ]]; then
+    if sudo ufw status 2>/dev/null | grep -q ' on virbr0'; then
+      info "    virbr0 incoming rule already present"
+    else
+      run sudo ufw allow in on virbr0
+    fi
+    run sudo ufw reload
+  else
+    run sudo ufw allow in on virbr0
+    run sudo ufw reload
+  fi
+else
+  info "4/7  UFW not installed/active — skipping firewall setup"
+fi
+
+# ---------- 5. groups ----------
+info "5/7  Adding '$TARGET_USER' to the libvirt and kvm groups..."
 if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx libvirt \
    && id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
   info "    already a member of libvirt and kvm"
@@ -91,8 +119,8 @@ else
   run sudo usermod -aG libvirt,kvm "$TARGET_USER"
 fi
 
-# ---------- 5. VM disk directory ----------
-info "5/6  Setting up $MYVMS..."
+# ---------- 6. VM disk directory ----------
+info "6/7  Setting up $MYVMS..."
 run mkdir -p "$MYVMS"
 
 # With system libvirt, QEMU runs as the libvirt-qemu (and/or qemu) user, which
@@ -112,8 +140,8 @@ else
   run sudo chmod 701 "$TARGET_HOME"
 fi
 
-# ---------- 6. vmaker + plugin ----------
-info "6/6  Installing vmaker and the vmaker.vms plugin..."
+# ---------- 7. vmaker + plugin ----------
+info "7/7  Installing vmaker and the vmaker.vms plugin..."
 BIN_DIR="$TARGET_HOME/.local/bin"
 PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
 PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
