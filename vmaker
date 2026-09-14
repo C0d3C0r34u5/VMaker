@@ -165,7 +165,6 @@ ARGS=(
   --network "network=default,model=$NET_MODEL"
   --graphics spice
   --video "$VIDEO"
-  --noautoconsole
 )
 
 if [ -n "$OS_VARIANT" ]; then
