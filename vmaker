@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vmaker - interactive VM creation helper for QEMU/KVM + libvirt
+# VMs are stored under ~/Myvms/<name>/
+
+VMROOT="${VMROOT:-$HOME/Myvms}"
+
+# ---------- helpers ----------
+err()  { echo "error: $*" >&2; exit 1; }
+info() { echo -e "\033[1;34m»\033[0m $*"; }
+
+ask_str() {
+  local prompt="$1" default="$2" ans
+  if [ -n "$default" ]; then
+    read -e -r -p "$prompt [$default]: " ans
+    ans="${ans:-$default}"
+  else
+    read -e -r -p "$prompt: " ans
+  fi
+  printf '%s' "$ans"
+}
+
+ask_int() {
+  local prompt="$1" default="$2" min="${3:-1}" max="${4:-}" ans
+  while true; do
+    ans="$(ask_str "$prompt" "$default")"
+    if [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge "$min" ] && { [ -z "$max" ] || [ "$ans" -le "$max" ]; }; then
+      printf '%s' "$ans"; return
+    fi
+    echo "  (enter a whole number ${min}..${max:-inf})" >&2
+  done
+}
+
+confirm() {
+  local ans
+  read -r -p "$1 [Y/n]: " ans
+  [[ "$ans" =~ ^([yY]([eE][sS])?)?$ ]]
+}
+
+# ---------- dependency checks ----------
+command -v virsh       >/dev/null 2>&1 || err "virsh not found — is libvirt installed?"
+command -v virt-install >/dev/null 2>&1 || err "virt-install not found — install the 'virt-install' package"
+command -v osinfo-query >/dev/null 2>&1 || err "osinfo-query not found — install libosinfo"
+command -v qemu-system-x86_64 >/dev/null 2>&1 || err "qemu-system-x86_64 not found — install qemu"
+
+if ! virsh -c qemu:///system connect >/dev/null 2>&1; then
+  err "can't connect to libvirt (qemu:///system). Have you logged out/in since being added to the 'libvirt' group?"
+fi
+
+# ---------- curated OS lists ----------
+LINUX_IDS=(ubuntu24.04 ubuntu22.04 debian13 debian12 fedora-unknown archlinux manjaro opensusetumbleweed)
+LINUX_NAMES=("Ubuntu 24.04 LTS" "Ubuntu 22.04 LTS" "Debian 13" "Debian 12" "Fedora (latest)" "Arch Linux" "Manjaro" "openSUSE Tumbleweed")
+
+WIN_IDS=(win11 win10 win2k25 win2k22)
+WIN_NAMES=("Windows 11" "Windows 10" "Windows Server 2025" "Windows Server 2022")
+
+pick_os() {
+  local -a ids names
+  local title
+  if [ "$1" = "linux" ]; then
+    ids=("${LINUX_IDS[@]}"); names=("${LINUX_NAMES[@]}"); title="Linux distribution"
+  else
+    ids=("${WIN_IDS[@]}"); names=("${WIN_NAMES[@]}"); title="Windows version"
+  fi
+
+  echo ""
+  info "$title"
+  local i
+  for i in "${!names[@]}"; do printf "  %d) %s\n" "$((i+1))" "${names[$i]}"; done
+  echo "  0) Other (auto-detect)"
+
+  local sel
+  while true; do
+    sel="$(ask_str "Choose" "1")"
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 0 ] && [ "$sel" -le "${#names[@]}" ]; then
+      break
+    fi
+    echo "  (enter 0..${#names[@]})" >&2
+  done
+
+  if [ "$sel" -eq 0 ]; then
+    OS_VARIANT=""
+    OS_NAME="$(ask_str "OS name/version (e.g. 'Kali Linux 2024.4')" "")"
+  else
+    OS_VARIANT="${ids[$((sel-1))]}"
+    OS_NAME="${names[$((sel-1))]}"
+  fi
+}
+
+# ---------- main ----------
+echo ""
+echo "  vmaker — create a KVM/libvirt VM in $VMROOT"
+echo ""
+
+# 1. OS type
+echo "Step 1: OS type"
+echo "  1) Linux"
+echo "  2) Windows"
+local_os_type="$(ask_str "Choose" "1")"
+case "$local_os_type" in
+  1|linux|Linux) OS_TYPE="linux";   pick_os "linux" ;;
+  2|win*|Windows) OS_TYPE="windows"; pick_os "windows" ;;
+  *) err "invalid OS type" ;;
+esac
+
+# 2. VM name
+DEF_NAME="$(printf '%s' "$OS_NAME" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')"
+NAME="$(ask_str "Step 2: VM name" "${DEF_NAME:-vm}")"
+NAME="$(printf '%s' "$NAME" | tr -c 'a-zA-Z0-9._-' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')"
+[ -n "$NAME" ] || err "VM name can't be empty"
+virsh -c qemu:///system dominfo "$NAME" >/dev/null 2>&1 && err "a VM named '$NAME' already exists"
+
+# 3. ISO
+echo ""
+info "Step 3: install ISO"
+while true; do
+  ISO="$(ask_str "Path to ISO (or drag file here)" "")"
+  ISO="${ISO/#\~/$HOME}"
+  ISO="$(printf '%s' "$ISO" | sed "s/^['\"]//;s/['\"]$//")"
+  [ -f "$ISO" ] && break
+  echo "  (not found: $ISO)" >&2
+done
+
+# 4. CPU cores
+echo ""
+CORES="$(ask_int "Step 4: CPU cores" "$(( $(nproc) / 2 ))" 1 "$(nproc)")"
+
+# 5. RAM
+TOTAL_GB="$(awk '/MemTotal/{printf "%.0f", $2/1024/1024}' /proc/meminfo)"
+DEF_RAM="$(( TOTAL_GB / 4 ))"
+[ "$DEF_RAM" -lt 2 ] && DEF_RAM=2
+echo ""
+RAM_GB="$(ask_int "Step 5: RAM in GB" "$DEF_RAM" 1 "$TOTAL_GB")"
+RAM_MIB="$(( RAM_GB * 1024 ))"
+
+# 6. Disk
+echo ""
+DISK_GB="$(ask_int "Step 6: disk size in GB" "20" 1 "")"
+
+# ---------- build VM config ----------
+VMDIR="$VMROOT/$NAME"
+DISK="$VMDIR/$NAME.qcow2"
+mkdir -p "$VMDIR"
+
+if [ "$OS_TYPE" = "windows" ]; then
+  DISK_BUS="sata"
+  NET_MODEL="e1000e"
+  VIDEO="qxl"
+  CPU_ARGS=("--cpu" "host")
+else
+  DISK_BUS="virtio"
+  NET_MODEL="virtio"
+  VIDEO="virtio"
+  CPU_ARGS=("--cpu" "host-passthrough")
+fi
+
+ARGS=(
+  --name "$NAME"
+  --memory "$RAM_MIB"
+  --vcpus "$CORES"
+  "${CPU_ARGS[@]}"
+  --disk "path=$DISK,format=qcow2,bus=$DISK_BUS,size=$DISK_GB"
+  --cdrom "$ISO"
+  --network "network=default,model=$NET_MODEL"
+  --graphics spice
+  --video "$VIDEO"
+  --noautoconsole
+)
+
+if [ -n "$OS_VARIANT" ]; then
+  ARGS+=(--os-variant "$OS_VARIANT")
+else
+  ARGS+=(--osinfo detect=on,require=off)
+fi
+
+if [ "$OS_TYPE" = "windows" ]; then
+  if [ "$OS_VARIANT" = "win11" ] || [ "$OS_VARIANT" = "win2k25" ]; then
+    # Windows 11 / Server 2025 want Secure Boot + TPM 2.0
+    ARGS+=(--machine q35)
+    ARGS+=(--boot loader=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd,nvram.template=/usr/share/edk2/x64/OVMF_VARS.4m.fd)
+    ARGS+=(--features smm.state=on)
+    ARGS+=(--tpm backend.type=emulator,backend.version=2.0,model=tpm-crb)
+  else
+    ARGS+=(--machine q35 --boot uefi)
+  fi
+else
+  ARGS+=(--boot uefi)
+fi
+
+# ---------- summary ----------
+echo ""
+echo "  ┌─ Summary ─────────────────────────────────────────────"
+printf "  │ Name:     %s\n" "$NAME"
+printf "  │ OS:       %s (%s)\n" "$OS_NAME" "${OS_VARIANT:-auto-detect}"
+printf "  │ ISO:      %s\n" "$ISO"
+printf "  │ CPU:      %s cores\n" "$CORES"
+printf "  │ RAM:      %s GB\n" "$RAM_GB"
+printf "  │ Disk:     %s GB -> %s\n" "$DISK_GB" "$DISK"
+echo "  └────────────────────────────────────────────────────────"
+echo ""
+
+if ! confirm "Create this VM?"; then
+  echo "aborted."; exit 0
+fi
+
+info "Creating VM '$NAME' ..."
+virt-install --connect qemu:///system "${ARGS[@]}"
+
+info "VM '$NAME' created. Start it anytime with:"
+echo "    virsh start $NAME"
+echo "    virsh shutdown $NAME   (graceful)"
+echo "    virsh destroy $NAME    (force)"
+echo ""
+echo "To install the OS now, open virt-manager (double-click the VM) or run:"
+echo "    virt-viewer $NAME"
+if [ "$OS_TYPE" = "windows" ]; then
+  echo ""
+  echo "Windows note: after install, install the virtio-win guest tools for best"
+  echo "disk/network/display performance."
+fi

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "brett.vms",
+  "name": "Virtual Machines",
+  "version": "0.1.0",
+  "author": "brett",
+  "license": "MIT",
+  "description": "List and start/stop libvirt VMs (created by vmaker) from the bar via virsh on qemu:///system.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "VMs",
+    "description": "Virtual machine state and start/stop controls",
+    "category": "System",
+    "aliases": ["vm", "vms", "virtual machine", "libvirt", "qemu"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
