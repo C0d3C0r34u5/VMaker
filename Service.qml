@@ -231,10 +231,26 @@ Item {
     actionWatchdog.stop()
     var kind = root.actionKind
     var code = actionProc.exitCode
+    var vm = root.actionVm
     root.actionError = code === 0 ? "" : Vms.describeActionError(kind, code)
     root.actionKind = ""
     root.actionVm = ""
+    if (kind === "start" && code === 0 && vm !== "") root.openViewer(vm)
     root.refresh()
+  }
+
+  // ------------------------------------------------------------ viewer
+
+  // Launch virt-viewer for a VM after a successful start, so the guest console
+  // pops up automatically instead of starting headless.
+  function openViewer(name) {
+    viewerProc.command = [Vms.VIRT_VIEWER_BINARY, "-c", Vms.VIRSH_URI, String(name)]
+    viewerProc.running = true
+  }
+
+  Process {
+    id: viewerProc
+    command: []
   }
 
   // ------------------------------------------------------------ scheduling
