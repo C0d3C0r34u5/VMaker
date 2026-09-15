@@ -137,6 +137,48 @@ omarchy plugin enable  vmaker.vms
 omarchy-shell vmaker.vms status
 ```
 
+## Uninstall
+
+To remove just the bar widget, delete the plugin:
+
+```bash
+omarchy plugin remove vmaker.vms --yes
+rm -f ~/.local/bin/vmaker
+```
+
+For a full uninstall (undo everything `vmakerSetup.sh` did), first stop any
+running VMs, then:
+
+```bash
+# 1. Remove the plugin and the vmaker helper
+omarchy plugin remove vmaker.vms --yes
+rm -f ~/.local/bin/vmaker
+
+# 2. Tear down the default libvirt network and disable libvirtd
+sudo virsh net-destroy default
+sudo virsh net-undefine default
+sudo systemctl disable --now libvirtd
+
+# 3. Remove the packages (skip if you want to keep QEMU/libvirt)
+sudo pacman -Rns qemu-desktop libvirt virt-install virt-manager virt-viewer \
+  edk2-ovmf dnsmasq swtpm iptables-nft libosinfo
+
+# 4. Remove yourself from the groups (optional)
+sudo gpasswd -d "$USER" libvirt
+sudo gpasswd -d "$USER" kvm
+
+# 5. Undo the UFW changes (only if UFW is active)
+sudo ufw deny in on virbr0
+sudo sed -i 's/^DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
+sudo ufw reload
+
+# 6. Delete your VMs (optional — removes all VM disks)
+rm -rf ~/Myvms
+```
+
+> Step 5 is only needed if UFW is enabled on your system. Step 6 is permanent —
+> only run it if you want to delete every VM and its disk.
+
 ## Notes
 
 - VMs use the system libvirt connection (`qemu:///system`), matching `vmaker`.
