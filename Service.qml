@@ -242,10 +242,67 @@ Item {
   // ------------------------------------------------------------ viewer
 
   // Launch virt-viewer for a VM after a successful start, so the guest console
-  // pops up automatically instead of starting headless.
+  // pops up automatically instead of starting headless. We only open a window
+  // when the domain actually has a graphics device (headless VMs have nothing
+  // to show) and virt-viewer is installed.
   function openViewer(name) {
-    viewerProc.command = [Vms.VIRT_VIEWER_BINARY, "-c", Vms.VIRSH_URI, String(name)]
-    viewerProc.running = true
+    viewerProbe.stdoutText = ""
+    viewerProbe.stdoutDone = false
+    viewerProbe.exitCode = -1
+    viewerProbe.vm = String(name)
+    viewerProbe.command = [Vms.VIRSH_BINARY, "-c", Vms.VIRSH_URI, "domdisplay", String(name)]
+    viewerProbe.running = true
+  }
+
+  // Ask libvirt which display a running domain exposes (spice://..., vnc://...).
+  // Empty output = no graphics device, so there is nothing to show.
+  Process {
+    id: viewerProbe
+    property string vm: ""
+    property int exitCode: -1
+    property bool stdoutDone: false
+    property string stdoutText: ""
+    command: []
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        viewerProbe.stdoutText = String(text || "").trim()
+        viewerProbe.stdoutDone = true
+        root.finishViewerProbe()
+      }
+    }
+
+    onExited: function(code) {
+      viewerProbe.exitCode = code
+      root.finishViewerProbe()
+    }
+  }
+
+  function finishViewerProbe() {
+    if (viewerProbe.exitCode === -1) return
+    if (!viewerProbe.stdoutDone) return
+    var display = viewerProbe.stdoutText
+    var name = viewerProbe.vm
+    viewerProbe.vm = ""
+    if (display === "" || name === "") return
+    viewerPreflight.vm = name
+    viewerPreflight.command = ["/usr/bin/test", "-x", Vms.VIRT_VIEWER_BINARY]
+    viewerPreflight.running = true
+  }
+
+  Process {
+    id: viewerPreflight
+    property string vm: ""
+    command: []
+
+    onExited: function(code) {
+      var name = viewerPreflight.vm
+      viewerPreflight.vm = ""
+      if (code !== 0 || name === "") return
+      viewerProc.command = [Vms.VIRT_VIEWER_BINARY, "-c", Vms.VIRSH_URI, name]
+      viewerProc.running = true
+    }
   }
 
   Process {
