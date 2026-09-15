@@ -3,6 +3,12 @@
 Interactive QEMU/KVM + libvirt VM creation for Arch/Omarchy, plus a bar
 widget to list and start/stop your VMs.
 
+## Preview
+
+![VMaker preview](preview.png)
+
+![VMaker preview 2](preview1.png)
+
 | Path | What it is |
 |------|-----------|
 | `manifest.json`, `*.qml`, `lib/` | The `vmaker.vms` plugin (manifest at the repo root) |
