@@ -7,7 +7,8 @@ set -euo pipefail
 #   1. Installs QEMU, libvirt, and their dependencies (pacman, via sudo)
 #   2. Enables and starts libvirtd and the default NAT network
 #   3. Adds the current user to the libvirt and kvm groups
-#   4. Configures UFW so VMs can reach the internet (forward + DHCP/DNS)
+#   4. Adds scoped UFW rules so VMs can reach the internet (NAT forwarding on
+#      the libvirt bridge + DHCP/DNS to dnsmasq)
 #   5. Grants the libvirt qemu process access to ~/Myvms (VM disks)
 #   6. Installs the vmaker script to ~/.local/bin
 #   7. Installs the vmaker.vms plugin and enables it in the Omarchy bar
@@ -84,26 +85,38 @@ run sudo virsh -c qemu:///system net-start default || warn "default network alre
 run sudo virsh -c qemu:///system net-autostart default
 
 # ---------- 4. firewall (UFW) ----------
-# UFW (when active) denies incoming connections and drops forwarded traffic by
-# default. Both break libvirt NAT networking: the guest's DHCP/DNS requests to
-# dnsmasq (bound to virbr0) are dropped as "incoming", and its internet traffic
-# is dropped as "forwarded". Fix both.
+# UFW (when active) drops forwarded traffic and incoming connections by
+# default. libvirt's default NAT network needs two narrowly-scoped allowances:
+#   • forwarding on virbr0 (guest <-> internet) — libvirt's own nftables
+#     rules still filter and NAT the traffic
+#   • DHCP (67/udp) + DNS (53/udp, 53/tcp) from the guest bridge to dnsmasq
+# We deliberately leave UFW's global DEFAULT_FORWARD_POLICY alone and do not
+# open all inbound traffic on virbr0.
 if command -v ufw >/dev/null 2>&1 && grep -qs '^ENABLED=yes' /etc/ufw/ufw.conf; then
-  info "4/7  Configuring UFW for libvirt NAT networking..."
-  # 1) Allow forwarded traffic (libvirt's own nftables rules still filter it).
-  if grep -qs '^DEFAULT_FORWARD_POLICY="DROP"' /etc/default/ufw; then
-    run sudo sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
-  fi
-  # 2) Allow incoming DHCP + DNS (and other host services) from the guest bridge.
-  if [[ $DRY_RUN -eq 0 ]]; then
-    if sudo ufw status 2>/dev/null | grep -q ' on virbr0'; then
-      info "    virbr0 incoming rule already present"
-    else
-      run sudo ufw allow in on virbr0
-    fi
+  info "4/7  Adding scoped UFW rules for libvirt NAT networking..."
+
+  # True if `ufw status` already contains the given grep pattern (real runs
+  # only — needs sudo, which is authenticated by step 1).
+  ufw_has() { sudo ufw status 2>/dev/null | grep -qE "$1"; }
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    run sudo ufw route allow in on virbr0
+    run sudo ufw route allow out on virbr0
+    run sudo ufw allow in on virbr0 to any port 67 proto udp
+    run sudo ufw allow in on virbr0 to any port 53 proto udp
+    run sudo ufw allow in on virbr0 to any port 53 proto tcp
     run sudo ufw reload
   else
-    run sudo ufw allow in on virbr0
+    # Forwarding, scoped to the libvirt bridge only. "in" covers guest ->
+    # internet; "out" covers the return path.
+    ufw_has 'ALLOW FWD.*on virbr0' || run sudo ufw route allow in on virbr0
+    ufw_has 'on virbr0.*ALLOW FWD' || run sudo ufw route allow out on virbr0
+
+    # DHCP + DNS from the guest bridge to the host's dnsmasq (INPUT chain).
+    ufw_has '67/udp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 67 proto udp
+    ufw_has '53/udp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 53 proto udp
+    ufw_has '53/tcp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 53 proto tcp
+
     run sudo ufw reload
   fi
 else

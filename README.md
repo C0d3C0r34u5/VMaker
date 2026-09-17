@@ -88,15 +88,18 @@ omarchy plugin add https://github.com/C0d3C0r34u5/VMaker.git --enable --yes
 ```
 
 You'll be asked for your sudo password once, up front. The script then does
-six things:
+seven things:
 
 1. Installs packages: `qemu-desktop libvirt virt-install virt-manager
    virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo`
 2. `systemctl enable --now libvirtd`
 3. Starts and autostarts the default NAT network (`virbr0`)
-4. Adds your user to the `libvirt` and `kvm` groups
-5. Creates `~/Myvms` and grants the qemu process access to it (POSIX ACLs)
-6. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell
+4. Adds scoped UFW rules (if UFW is active): forwarding on `virbr0` plus
+   DHCP (67/udp) and DNS (53/udp, 53/tcp) from the guest bridge. It does
+   **not** change the global forward policy or open all inbound traffic.
+5. Adds your user to the `libvirt` and `kvm` groups
+6. Creates `~/Myvms` and grants the qemu process access to it (POSIX ACLs)
+7. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell
 
 ## Creating a VM
 
@@ -167,9 +170,12 @@ sudo pacman -Rns qemu-desktop libvirt virt-install virt-manager virt-viewer \
 sudo gpasswd -d "$USER" libvirt
 sudo gpasswd -d "$USER" kvm
 
-# 5. Undo the UFW changes (only if UFW is active)
-sudo ufw deny in on virbr0
-sudo sed -i 's/^DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
+# 5. Undo the UFW rules (only if UFW is active)
+sudo ufw delete allow in on virbr0 to any port 67 proto udp
+sudo ufw delete allow in on virbr0 to any port 53 proto udp
+sudo ufw delete allow in on virbr0 to any port 53 proto tcp
+sudo ufw delete route allow in on virbr0
+sudo ufw delete route allow out on virbr0
 sudo ufw reload
 
 # 6. Delete your VMs (optional — removes all VM disks)
@@ -178,6 +184,16 @@ rm -rf ~/Myvms
 
 > Step 5 is only needed if UFW is enabled on your system. Step 6 is permanent —
 > only run it if you want to delete every VM and its disk.
+
+> **Upgraded from an older vmakerSetup.sh?** Versions before the scoped rules
+> also set `DEFAULT_FORWARD_POLICY="ACCEPT"` and added an unrestricted
+> `ufw allow in on virbr0`. Reverse those too:
+>
+> ```bash
+> sudo ufw delete allow in on virbr0
+> sudo sed -i 's/^DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
+> sudo ufw reload
+> ```
 
 ## Notes
 
