@@ -17,7 +17,11 @@ set -euo pipefail
 #   ./vmakerSetup.sh              # install for real
 #   ./vmakerSetup.sh --dry-run    # print what would happen, change nothing
 #
-# You will be prompted for your sudo password.
+# Security: the invoking user is resolved from the system database (never from
+# the USER/SUDO_USER environment variables, which are caller-controlled), and
+# every privileged step runs inside a single sudo invocation whose arguments
+# and payload are fixed before sudo authenticates. There is no cached-sudo
+# window during which a same-UID process could edit this script and escalate.
 
 # ---------- helpers ----------
 err()  { echo -e "\033[1;31merror:\033[0m $*" >&2; exit 1; }
@@ -41,23 +45,29 @@ run() {
 # also a valid plugin dir for `omarchy plugin add`.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The user we are installing for (also correct when run via sudo).
-TARGET_USER="${SUDO_USER:-$USER}"
-TARGET_USER="${TARGET_USER:-$(id -un)}"
-TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
-MYVMS="$TARGET_HOME/Myvms"
-
 # Packages needed by vmaker and the plugin.
 PACKAGES=(qemu-desktop libvirt virt-install virt-manager virt-viewer \
           edk2-ovmf dnsmasq swtpm iptables-nft libosinfo)
 
 # ---------- guards ----------
-if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+if [[ $EUID -eq 0 ]]; then
   err "run this script as your normal user (not via sudo) — it asks for sudo itself when needed"
 fi
 command -v pacman >/dev/null 2>&1 || err "this script needs pacman (Arch/Omarchy)"
 command -v sudo   >/dev/null 2>&1 || err "this script needs sudo"
+
+# ---------- identity (from the OS, not the environment) ----------
+TARGET_USER="$(id -un)"
+TARGET_UID="$(id -u)"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+MYVMS="$TARGET_HOME/Myvms"
+
+# Verify the identity against the system database, not whatever USER/SUDO_USER
+# happen to say.
 [[ -n "$TARGET_HOME" ]] || err "could not resolve a home directory for '$TARGET_USER'"
+[[ "$(getent passwd "$TARGET_USER" | cut -d: -f3)" == "$TARGET_UID" ]] \
+  || err "could not verify '$TARGET_USER' (uid $TARGET_UID) against the system database"
+
 [[ -f "$SCRIPT_DIR/vmaker" ]] || err "vmaker script not found next to $0"
 [[ -f "$SCRIPT_DIR/manifest.json" ]] || err "plugin manifest.json not found next to $0"
 
@@ -66,91 +76,123 @@ info "vmakerSetup — installing vmaker + vmaker.vms for '$TARGET_USER'"
 [[ $DRY_RUN -eq 1 ]] && warn "dry run: nothing will be changed"
 echo ""
 
-# ---------- 1. packages ----------
-info "1/7  Installing packages (this needs your sudo password)..."
-if [[ $DRY_RUN -eq 0 ]]; then
-  sudo -v || err "sudo authentication failed"
-  sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
-else
-  run sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
+# ---------- non-privileged decisions ----------
+# Decide everything we can WITHOUT root up front, so the privileged payload
+# below is fully fixed before sudo is ever asked for.
+
+UFW_ACTIVE=0
+if command -v ufw >/dev/null 2>&1 && grep -qs '^ENABLED=yes' /etc/ufw/ufw.conf; then
+  UFW_ACTIVE=1
 fi
 
-# ---------- 2. libvirtd ----------
+NEED_GROUPS=0
+if ! id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx libvirt \
+   || ! id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
+  NEED_GROUPS=1
+fi
+
+HAS_SETFACL=0
+command -v setfacl >/dev/null 2>&1 && HAS_SETFACL=1
+
+QEMU_USERS=()
+for qu in libvirt-qemu qemu; do
+  getent passwd "$qu" >/dev/null 2>&1 && QEMU_USERS+=("$qu")
+done
+
+# ---------- progress ----------
+info "1/7  Installing packages..."
 info "2/7  Enabling and starting libvirtd..."
-run sudo systemctl enable --now libvirtd
-
-# ---------- 3. default network ----------
 info "3/7  Starting the default NAT network..."
-run sudo virsh -c qemu:///system net-start default || warn "default network already active (or not available)"
-run sudo virsh -c qemu:///system net-autostart default
-
-# ---------- 4. firewall (UFW) ----------
-# UFW (when active) drops forwarded traffic and incoming connections by
-# default. libvirt's default NAT network needs two narrowly-scoped allowances:
-#   • forwarding on virbr0 (guest <-> internet) — libvirt's own nftables
-#     rules still filter and NAT the traffic
-#   • DHCP (67/udp) + DNS (53/udp, 53/tcp) from the guest bridge to dnsmasq
-# We deliberately leave UFW's global DEFAULT_FORWARD_POLICY alone and do not
-# open all inbound traffic on virbr0.
-if command -v ufw >/dev/null 2>&1 && grep -qs '^ENABLED=yes' /etc/ufw/ufw.conf; then
+if [[ $UFW_ACTIVE -eq 1 ]]; then
   info "4/7  Adding scoped UFW rules for libvirt NAT networking..."
+else
+  info "4/7  UFW not installed/active — skipping firewall setup"
+fi
+if [[ $NEED_GROUPS -eq 1 ]]; then
+  info "5/7  Adding '$TARGET_USER' to the libvirt and kvm groups..."
+else
+  info "5/7  '$TARGET_USER' is already a member of libvirt and kvm"
+fi
+info "6/7  Setting up $MYVMS..."
 
-  # True if `ufw status` already contains the given grep pattern (real runs
-  # only — needs sudo, which is authenticated by step 1).
-  ufw_has() { sudo ufw status 2>/dev/null | grep -qE "$1"; }
-
-  if [[ $DRY_RUN -eq 1 ]]; then
+# ---------- privileged steps (single sudo) ----------
+if [[ $DRY_RUN -eq 1 ]]; then
+  run sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
+  run sudo systemctl enable --now libvirtd
+  run sudo virsh -c qemu:///system net-start default
+  run sudo virsh -c qemu:///system net-autostart default
+  if [[ $UFW_ACTIVE -eq 1 ]]; then
     run sudo ufw route allow in on virbr0
     run sudo ufw route allow out on virbr0
     run sudo ufw allow in on virbr0 to any port 67 proto udp
     run sudo ufw allow in on virbr0 to any port 53 proto udp
     run sudo ufw allow in on virbr0 to any port 53 proto tcp
     run sudo ufw reload
+  fi
+  if [[ $NEED_GROUPS -eq 1 ]]; then
+    run sudo usermod -aG libvirt,kvm "$TARGET_USER"
+  fi
+  run mkdir -p "$MYVMS"
+  if [[ $HAS_SETFACL -eq 1 ]]; then
+    for qu in "${QEMU_USERS[@]}"; do
+      run sudo setfacl -m "u:$qu:--x" "$TARGET_HOME"
+    done
+    run sudo setfacl -R -m "g:kvm:rwX" "$MYVMS"
+    run sudo setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
   else
-    # Forwarding, scoped to the libvirt bridge only. "in" covers guest ->
-    # internet; "out" covers the return path.
-    ufw_has 'ALLOW FWD.*on virbr0' || run sudo ufw route allow in on virbr0
-    ufw_has 'on virbr0.*ALLOW FWD' || run sudo ufw route allow out on virbr0
-
-    # DHCP + DNS from the guest bridge to the host's dnsmasq (INPUT chain).
-    ufw_has '67/udp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 67 proto udp
-    ufw_has '53/udp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 53 proto udp
-    ufw_has '53/tcp.*on virbr0' || run sudo ufw allow in on virbr0 to any port 53 proto tcp
-
-    run sudo ufw reload
+    run sudo chmod 701 "$TARGET_HOME"
   fi
 else
-  info "4/7  UFW not installed/active — skipping firewall setup"
+  sudo bash -s -- "$TARGET_USER" "$TARGET_HOME" "$UFW_ACTIVE" "$NEED_GROUPS" \
+      "$HAS_SETFACL" "${QEMU_USERS[*]}" <<'VMAKER_PRIV'
+set -euo pipefail
+TARGET_USER="$1"
+TARGET_HOME="$2"
+UFW_ACTIVE="$3"
+NEED_GROUPS="$4"
+HAS_SETFACL="$5"
+read -ra QEMU_USERS <<< "$6" || true
+MYVMS="$TARGET_HOME/Myvms"
+
+# 1. packages
+pacman -S --needed --noconfirm qemu-desktop libvirt virt-install virt-manager \
+  virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo
+
+# 2. libvirtd
+systemctl enable --now libvirtd
+
+# 3. default NAT network
+virsh -c qemu:///system net-start default || true
+virsh -c qemu:///system net-autostart default
+
+# 4. scoped UFW rules
+if [[ "$UFW_ACTIVE" == "1" ]]; then
+  ufw_has() { ufw status 2>/dev/null | grep -qE "$1"; }
+  ufw_has 'ALLOW FWD.*on virbr0' || ufw route allow in on virbr0
+  ufw_has 'on virbr0.*ALLOW FWD' || ufw route allow out on virbr0
+  ufw_has '67/udp.*on virbr0' || ufw allow in on virbr0 to any port 67 proto udp
+  ufw_has '53/udp.*on virbr0' || ufw allow in on virbr0 to any port 53 proto udp
+  ufw_has '53/tcp.*on virbr0' || ufw allow in on virbr0 to any port 53 proto tcp
+  ufw reload
 fi
 
-# ---------- 5. groups ----------
-info "5/7  Adding '$TARGET_USER' to the libvirt and kvm groups..."
-if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx libvirt \
-   && id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx kvm; then
-  info "    already a member of libvirt and kvm"
-else
-  run sudo usermod -aG libvirt,kvm "$TARGET_USER"
+# 5. groups
+if [[ "$NEED_GROUPS" == "1" ]]; then
+  usermod -aG libvirt,kvm "$TARGET_USER"
 fi
 
-# ---------- 6. VM disk directory ----------
-info "6/7  Setting up $MYVMS..."
-run mkdir -p "$MYVMS"
-
-# With system libvirt, QEMU runs as the libvirt-qemu (and/or qemu) user, which
-# is a member of the kvm group. It must be able to traverse the home directory
-# and read/write the disk images. Use POSIX ACLs where available; fall back to
-# a plain (looser) chmod otherwise.
-if command -v setfacl >/dev/null 2>&1; then
-  for qu in libvirt-qemu qemu; do
-    if getent passwd "$qu" >/dev/null 2>&1; then
-      run sudo setfacl -m "u:$qu:--x" "$TARGET_HOME"
-    fi
+# 6. VM disk directory + qemu access
+mkdir -p "$MYVMS"
+if [[ "$HAS_SETFACL" == "1" ]]; then
+  for qu in "${QEMU_USERS[@]}"; do
+    setfacl -m "u:$qu:--x" "$TARGET_HOME"
   done
-  run sudo setfacl -R -m "g:kvm:rwX" "$MYVMS"
-  run sudo setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
+  setfacl -R -m "g:kvm:rwX" "$MYVMS"
+  setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
 else
-  warn "setfacl not found; falling back to 'chmod 701' on the home directory"
-  run sudo chmod 701 "$TARGET_HOME"
+  chmod 701 "$TARGET_HOME"
+fi
+VMAKER_PRIV
 fi
 
 # ---------- 7. vmaker + plugin ----------
