@@ -47,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Packages needed by vmaker and the plugin.
 PACKAGES=(qemu-desktop libvirt virt-install virt-manager virt-viewer \
-          edk2-ovmf dnsmasq swtpm iptables-nft libosinfo)
+          edk2-ovmf dnsmasq swtpm iptables-nft libosinfo acl)
 
 # ---------- guards ----------
 if [[ $EUID -eq 0 ]]; then
@@ -91,9 +91,6 @@ if ! id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx libvirt \
   NEED_GROUPS=1
 fi
 
-HAS_SETFACL=0
-command -v setfacl >/dev/null 2>&1 && HAS_SETFACL=1
-
 QEMU_USERS=()
 for qu in libvirt-qemu qemu; do
   getent passwd "$qu" >/dev/null 2>&1 && QEMU_USERS+=("$qu")
@@ -133,30 +130,25 @@ if [[ $DRY_RUN -eq 1 ]]; then
     run sudo usermod -aG libvirt,kvm "$TARGET_USER"
   fi
   run mkdir -p "$MYVMS"
-  if [[ $HAS_SETFACL -eq 1 ]]; then
-    for qu in "${QEMU_USERS[@]}"; do
-      run sudo setfacl -m "u:$qu:--x" "$TARGET_HOME"
-    done
-    run sudo setfacl -R -m "g:kvm:rwX" "$MYVMS"
-    run sudo setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
-  else
-    run sudo chmod 701 "$TARGET_HOME"
-  fi
+  for qu in "${QEMU_USERS[@]}"; do
+    run sudo setfacl -m "u:$qu:--x" "$TARGET_HOME"
+  done
+  run sudo setfacl -R -m "g:kvm:rwX" "$MYVMS"
+  run sudo setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
 else
   sudo bash -s -- "$TARGET_USER" "$TARGET_HOME" "$UFW_ACTIVE" "$NEED_GROUPS" \
-      "$HAS_SETFACL" "${QEMU_USERS[*]}" <<'VMAKER_PRIV'
+      "${QEMU_USERS[*]}" <<'VMAKER_PRIV'
 set -euo pipefail
 TARGET_USER="$1"
 TARGET_HOME="$2"
 UFW_ACTIVE="$3"
 NEED_GROUPS="$4"
-HAS_SETFACL="$5"
-read -ra QEMU_USERS <<< "$6" || true
+read -ra QEMU_USERS <<< "$5" || true
 MYVMS="$TARGET_HOME/Myvms"
 
 # 1. packages
 pacman -S --needed --noconfirm qemu-desktop libvirt virt-install virt-manager \
-  virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo
+  virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo acl
 
 # 2. libvirtd
 systemctl enable --now libvirtd
@@ -182,16 +174,18 @@ if [[ "$NEED_GROUPS" == "1" ]]; then
 fi
 
 # 6. VM disk directory + qemu access
+# setfacl (from the `acl` package, installed above as a dependency of libvirt)
+# grants only the qemu account(s) execute-on-home, never "other".
+command -v setfacl >/dev/null 2>&1 || {
+  echo "error: setfacl not found (install the 'acl' package)" >&2
+  exit 1
+}
 mkdir -p "$MYVMS"
-if [[ "$HAS_SETFACL" == "1" ]]; then
-  for qu in "${QEMU_USERS[@]}"; do
-    setfacl -m "u:$qu:--x" "$TARGET_HOME"
-  done
-  setfacl -R -m "g:kvm:rwX" "$MYVMS"
-  setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
-else
-  chmod 701 "$TARGET_HOME"
-fi
+for qu in "${QEMU_USERS[@]}"; do
+  setfacl -m "u:$qu:--x" "$TARGET_HOME"
+done
+setfacl -R -m "g:kvm:rwX" "$MYVMS"
+setfacl -R -d -m "g:kvm:rwX" "$MYVMS"
 VMAKER_PRIV
 fi
 

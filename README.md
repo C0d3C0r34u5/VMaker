@@ -91,7 +91,7 @@ You'll be asked for your sudo password once, up front. The script then does
 seven things:
 
 1. Installs packages: `qemu-desktop libvirt virt-install virt-manager
-   virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo`
+   virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo acl`
 2. `systemctl enable --now libvirtd`
 3. Starts and autostarts the default NAT network (`virbr0`)
 4. Adds scoped UFW rules (if UFW is active): forwarding on `virbr0` plus
