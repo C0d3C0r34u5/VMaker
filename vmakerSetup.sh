@@ -40,6 +40,16 @@ run() {
   fi
 }
 
+# Report a conflict that means we must not touch a file. A real run aborts; a
+# dry run only warns so the preview still completes.
+conflict() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    warn "$*"
+  else
+    err "$*"
+  fi
+}
+
 # Directory this script lives in (the VMaker repo root). The plugin files
 # (manifest.json, *.qml, lib/) sit alongside this script, so the whole repo is
 # also a valid plugin dir for `omarchy plugin add`.
@@ -192,24 +202,102 @@ fi
 # ---------- 7. vmaker + plugin ----------
 info "7/7  Installing vmaker and the vmaker.vms plugin..."
 BIN_DIR="$TARGET_HOME/.local/bin"
+BIN_DST="$BIN_DIR/vmaker"
 PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
 PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
+# A string unique to our script, used to tell an existing vmaker install apart
+# from an unrelated executable that merely shares the name.
+VMAKER_MARKER='interactive VM creation helper for QEMU/KVM'
 
-run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DIR/vmaker"
-
-# If this script is being run from inside the already-installed plugin dir
-# (e.g. `~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh` after
-# `omarchy plugin add`), the plugin files are already in place. Don't `rm -rf`
-# the very directory we're running from.
-if [[ "$SCRIPT_DIR" == "$PLUGIN_DST" ]]; then
-  info "    plugin already installed at $PLUGIN_DST (skipping copy)"
-else
-  run rm -rf "$PLUGIN_DST"
+# Copy the plugin's own files into $PLUGIN_DST, creating it if needed. Files
+# with the same names are replaced; anything else already in the directory is
+# left alone. Using "$f/." (not "$f") avoids nesting a duplicate directory on
+# re-runs.
+copy_plugin_files() {
+  local f
   run mkdir -p "$PLUGIN_DST"
   for f in "${PLUGIN_FILES[@]}"; do
-    run cp -R "$SCRIPT_DIR/$f" "$PLUGIN_DST/$f"
+    if [[ -d "$SCRIPT_DIR/$f" ]]; then
+      run mkdir -p "$PLUGIN_DST/$f"
+      run cp -R "$SCRIPT_DIR/$f/." "$PLUGIN_DST/$f/"
+    else
+      run cp -f "$SCRIPT_DIR/$f" "$PLUGIN_DST/$f"
+    fi
   done
+}
+
+# --- 7a. vmaker binary: never clobber a file that isn't ours ---
+BIN_MODE="install"
+if [[ -L "$BIN_DST" ]]; then
+  BIN_MODE="refuse"
+  conflict "$BIN_DST is a symbolic link; refusing to overwrite it — move it aside first"
+elif [[ -e "$BIN_DST" ]]; then
+  BIN_OWNER="$(stat -c %u "$BIN_DST" 2>/dev/null || true)"
+  if [[ "$BIN_OWNER" != "$TARGET_UID" ]]; then
+    BIN_MODE="refuse"
+    conflict "$BIN_DST is owned by uid ${BIN_OWNER:-?}, not '$TARGET_USER'; refusing to overwrite it"
+  elif [[ ! -f "$BIN_DST" ]]; then
+    BIN_MODE="refuse"
+    conflict "$BIN_DST is not a regular file; refusing to overwrite it"
+  elif ! grep -qF "$VMAKER_MARKER" "$BIN_DST" 2>/dev/null; then
+    BIN_MODE="refuse"
+    conflict "$BIN_DST exists but is not the vmaker script; refusing to overwrite it — move it aside first"
+  elif cmp -s "$SCRIPT_DIR/vmaker" "$BIN_DST"; then
+    BIN_MODE="uptodate"
+  fi
 fi
+
+case "$BIN_MODE" in
+  install)  run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DST" ;;
+  uptodate) info "    vmaker is already up to date at $BIN_DST" ;;
+  refuse)   : ;;  # conflict() already reported it
+esac
+
+# --- 7b. plugin dir: preserve anything the user added ---
+# If this script is being run from inside the already-installed plugin dir
+# (e.g. `~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh` after
+# `omarchy plugin add`), the plugin files are already in place. Don't touch
+# the very directory we're running from.
+PLUGIN_MODE="replace"
+if [[ "$SCRIPT_DIR" == "$PLUGIN_DST" ]]; then
+  PLUGIN_MODE="skip"
+elif [[ -L "$PLUGIN_DST" ]]; then
+  PLUGIN_MODE="refuse"
+  conflict "$PLUGIN_DST is a symbolic link; refusing to delete it"
+elif [[ -e "$PLUGIN_DST" ]]; then
+  PLUGIN_OWNER="$(stat -c %u "$PLUGIN_DST" 2>/dev/null || true)"
+  if [[ "$PLUGIN_OWNER" != "$TARGET_UID" ]]; then
+    PLUGIN_MODE="refuse"
+    conflict "$PLUGIN_DST is owned by uid ${PLUGIN_OWNER:-?}, not '$TARGET_USER'; refusing to delete it"
+  else
+    # Look for entries that aren't VMaker's own. If any exist, don't `rm -rf`
+    # the directory — update the plugin's files in place and leave the user's
+    # files untouched.
+    while IFS= read -r -d '' entry; do
+      base="$(basename "$entry")"
+      case " ${PLUGIN_FILES[*]} " in
+        *" $base "*) ;;
+        *) PLUGIN_MODE="merge"; break ;;
+      esac
+    done < <(find "$PLUGIN_DST" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  fi
+fi
+
+case "$PLUGIN_MODE" in
+  skip)
+    info "    plugin already installed at $PLUGIN_DST (skipping copy)"
+    ;;
+  merge)
+    warn "    $PLUGIN_DST contains files not installed by VMaker; updating in place and leaving them untouched"
+    copy_plugin_files
+    ;;
+  replace)
+    run rm -rf "$PLUGIN_DST"
+    copy_plugin_files
+    ;;
+  refuse)
+    : ;;  # conflict() already reported it
+esac
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -238,4 +326,6 @@ echo "  1. Log out and back in so the libvirt/kvm group membership takes effect.
 echo "  2. Run 'vmaker' to create a VM."
 echo "  3. The VMs widget (vmaker.vms) should now be in the bar's right section."
 echo ""
-[[ $DRY_RUN -eq 1 ]] && warn "This was a dry run — nothing was changed."
+if [[ $DRY_RUN -eq 1 ]]; then
+  warn "This was a dry run — nothing was changed."
+fi

@@ -58,6 +58,19 @@ The script is idempotent, so running it again is safe:
 - re-copying `vmaker.vms` over itself is harmless
 - your user is only added to the groups if missing
 
+It is also careful never to destroy something it didn't create:
+
+- `~/.local/bin/vmaker` is only overwritten if the existing file is the
+  VMaker script. A same-named unrelated executable, a non-regular file, or a
+  symlink is left alone, and the install stops with an explanatory error so
+  you can move it aside first.
+- `~/.config/omarchy/plugins/vmaker.vms` is only replaced wholesale if it
+  contains nothing but VMaker's own files. If you have added your own files
+  there, the plugin's files are updated in place and your files are left
+  untouched.
+- The plugin directory is never deleted if it is a symlink or not owned by
+  you.
+
 After it finishes, log out and back in.
 
 ### Install only the plugin (no system changes)
@@ -100,6 +113,7 @@ seven things:
 5. Adds your user to the `libvirt` and `kvm` groups
 6. Creates `~/Myvms` and grants the qemu process access to it (POSIX ACLs)
 7. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell
+   (refusing to overwrite anything it didn't create — see above)
 
 ## Creating a VM
 
