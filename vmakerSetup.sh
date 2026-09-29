@@ -65,6 +65,7 @@ if [[ $EUID -eq 0 ]]; then
 fi
 command -v pacman >/dev/null 2>&1 || err "this script needs pacman (Arch/Omarchy)"
 command -v sudo   >/dev/null 2>&1 || err "this script needs sudo"
+command -v sha256sum >/dev/null 2>&1 || err "this script needs sha256sum (coreutils)"
 
 # ---------- identity (from the OS, not the environment) ----------
 TARGET_USER="$(id -un)"
@@ -205,14 +206,40 @@ BIN_DIR="$TARGET_HOME/.local/bin"
 BIN_DST="$BIN_DIR/vmaker"
 PLUGIN_DST="$TARGET_HOME/.config/omarchy/plugins/vmaker.vms"
 PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
-# A string unique to our script, used to tell an existing vmaker install apart
-# from an unrelated executable that merely shares the name.
-VMAKER_MARKER='interactive VM creation helper for QEMU/KVM'
+
+# SHA-256 of every vmaker script shipped by a released vmakerSetup.sh. An
+# existing ~/.local/bin/vmaker is ours only when its content hash is in this
+# list (a known VMaker build) or it is byte-identical to the bundled script.
+# Anything else — even a file that carries VMaker-looking text — is refused,
+# never overwritten. When vmaker changes, add the new sha256 here so the next
+# release can upgrade over this one.
+VMAKER_KNOWN_SHA256=(
+  76400895a194718e7878a83daa13915678d09e86daf3efbb0e026b279185396a  # initial release
+  f0863f0ed3185056061a70ea6ed96f7565f144eb32cfbde5355bbd8105705de5  # virt-viewer auto-open
+)
+
+# Relative paths (files and directories) that belong to the plugin, mapping to
+# "file"/"dir". Anything present in the installed directory but absent here was
+# put there by the user and must be preserved.
+declare -A PLUGIN_MANAGED=()
+for f in "${PLUGIN_FILES[@]}"; do
+  if [[ -d "$SCRIPT_DIR/$f" ]]; then
+    PLUGIN_MANAGED["$f"]="dir"
+    while IFS= read -r -d '' p; do
+      rel="${p#"$SCRIPT_DIR"/}"
+      if [[ -d "$p" ]]; then PLUGIN_MANAGED["$rel"]="dir"; else PLUGIN_MANAGED["$rel"]="file"; fi
+    done < <(find "$SCRIPT_DIR/$f" -mindepth 1 -print0)
+  elif [[ -e "$SCRIPT_DIR/$f" ]]; then
+    PLUGIN_MANAGED["$f"]="file"
+  fi
+done
 
 # Copy the plugin's own files into $PLUGIN_DST, creating it if needed. Files
 # with the same names are replaced; anything else already in the directory is
 # left alone. Using "$f/." (not "$f") avoids nesting a duplicate directory on
-# re-runs.
+# re-runs. Callers run the preflight first, so every destination path is known
+# to be a regular file/dir owned by the target user — never a symlink to write
+# through.
 copy_plugin_files() {
   local f
   run mkdir -p "$PLUGIN_DST"
@@ -226,7 +253,7 @@ copy_plugin_files() {
   done
 }
 
-# --- 7a. vmaker binary: never clobber a file that isn't ours ---
+# --- 7a. vmaker binary: only replace a file we can prove is a VMaker build ---
 BIN_MODE="install"
 if [[ -L "$BIN_DST" ]]; then
   BIN_MODE="refuse"
@@ -239,47 +266,87 @@ elif [[ -e "$BIN_DST" ]]; then
   elif [[ ! -f "$BIN_DST" ]]; then
     BIN_MODE="refuse"
     conflict "$BIN_DST is not a regular file; refusing to overwrite it"
-  elif ! grep -qF "$VMAKER_MARKER" "$BIN_DST" 2>/dev/null; then
-    BIN_MODE="refuse"
-    conflict "$BIN_DST exists but is not the vmaker script; refusing to overwrite it — move it aside first"
   elif cmp -s "$SCRIPT_DIR/vmaker" "$BIN_DST"; then
     BIN_MODE="uptodate"
+  else
+    BIN_SHA="$(sha256sum "$BIN_DST" | awk '{print $1}')"
+    BIN_KNOWN=0
+    for h in "${VMAKER_KNOWN_SHA256[@]}"; do
+      [[ "$h" == "$BIN_SHA" ]] && { BIN_KNOWN=1; break; }
+    done
+    if [[ $BIN_KNOWN -eq 1 ]]; then
+      BIN_MODE="upgrade"
+    else
+      BIN_MODE="refuse"
+      conflict "$BIN_DST is not a known VMaker release (sha256 $BIN_SHA); refusing to overwrite it — move it aside first"
+    fi
   fi
 fi
 
 case "$BIN_MODE" in
   install)  run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DST" ;;
+  upgrade)  info "    upgrading vmaker at $BIN_DST"
+            run install -Dm755 "$SCRIPT_DIR/vmaker" "$BIN_DST" ;;
   uptodate) info "    vmaker is already up to date at $BIN_DST" ;;
   refuse)   : ;;  # conflict() already reported it
 esac
 
-# --- 7b. plugin dir: preserve anything the user added ---
+# --- 7b. plugin dir: update only our files, preserve everything else ---
+# The directory is never removed. We replace only the paths VMaker installed;
+# user-added files anywhere (including inside lib/ and tests/) are left
+# untouched. Managed paths are overwritten only when they are target-owned
+# regular files/dirs — a symlink or foreign-owned entry stops the install.
+#
 # If this script is being run from inside the already-installed plugin dir
 # (e.g. `~/.config/omarchy/plugins/vmaker.vms/vmakerSetup.sh` after
 # `omarchy plugin add`), the plugin files are already in place. Don't touch
 # the very directory we're running from.
-PLUGIN_MODE="replace"
+PLUGIN_MODE="install"
 if [[ "$SCRIPT_DIR" == "$PLUGIN_DST" ]]; then
   PLUGIN_MODE="skip"
 elif [[ -L "$PLUGIN_DST" ]]; then
   PLUGIN_MODE="refuse"
-  conflict "$PLUGIN_DST is a symbolic link; refusing to delete it"
+  conflict "$PLUGIN_DST is a symbolic link; refusing to write into it"
 elif [[ -e "$PLUGIN_DST" ]]; then
   PLUGIN_OWNER="$(stat -c %u "$PLUGIN_DST" 2>/dev/null || true)"
   if [[ "$PLUGIN_OWNER" != "$TARGET_UID" ]]; then
     PLUGIN_MODE="refuse"
-    conflict "$PLUGIN_DST is owned by uid ${PLUGIN_OWNER:-?}, not '$TARGET_USER'; refusing to delete it"
-  else
-    # Look for entries that aren't VMaker's own. If any exist, don't `rm -rf`
-    # the directory — update the plugin's files in place and leave the user's
-    # files untouched.
-    while IFS= read -r -d '' entry; do
-      base="$(basename "$entry")"
-      case " ${PLUGIN_FILES[*]} " in
-        *" $base "*) ;;
-        *) PLUGIN_MODE="merge"; break ;;
-      esac
-    done < <(find "$PLUGIN_DST" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    conflict "$PLUGIN_DST is owned by uid ${PLUGIN_OWNER:-?}, not '$TARGET_USER'; refusing to write into it"
+  fi
+fi
+
+# Preflight the installed tree while it is still unmodified: refuse symlinked,
+# non-regular, or foreign-owned managed paths, and record any user-added paths.
+PLUGIN_EXTRA=()
+PLUGIN_CONFLICT=0
+if [[ "$PLUGIN_MODE" == "install" && -e "$PLUGIN_DST" ]]; then
+  while IFS= read -r -d '' p; do
+    rel="${p#"$PLUGIN_DST"/}"
+    if [[ -z "${PLUGIN_MANAGED[$rel]+x}" ]]; then
+      PLUGIN_EXTRA+=("$rel")
+      continue
+    fi
+    if [[ "$(stat -c %u "$p" 2>/dev/null || true)" != "$TARGET_UID" ]]; then
+      conflict "$PLUGIN_DST/$rel is not owned by '$TARGET_USER'; refusing to overwrite it"
+      PLUGIN_CONFLICT=1
+    elif [[ -L "$p" ]]; then
+      conflict "$PLUGIN_DST/$rel is a symbolic link; refusing to overwrite it"
+      PLUGIN_CONFLICT=1
+    elif [[ "${PLUGIN_MANAGED[$rel]}" == "dir" && ! -d "$p" ]]; then
+      conflict "$PLUGIN_DST/$rel should be a directory; refusing to overwrite it"
+      PLUGIN_CONFLICT=1
+    elif [[ "${PLUGIN_MANAGED[$rel]}" == "file" && ! -f "$p" ]]; then
+      conflict "$PLUGIN_DST/$rel should be a regular file; refusing to overwrite it"
+      PLUGIN_CONFLICT=1
+    fi
+  done < <(find "$PLUGIN_DST" -mindepth 1 -print0 2>/dev/null)
+fi
+
+if [[ "$PLUGIN_MODE" == "install" ]]; then
+  if [[ $PLUGIN_CONFLICT -eq 1 ]]; then
+    PLUGIN_MODE="refuse"
+  elif [[ ${#PLUGIN_EXTRA[@]} -gt 0 ]]; then
+    PLUGIN_MODE="merge"
   fi
 fi
 
@@ -288,11 +355,10 @@ case "$PLUGIN_MODE" in
     info "    plugin already installed at $PLUGIN_DST (skipping copy)"
     ;;
   merge)
-    warn "    $PLUGIN_DST contains files not installed by VMaker; updating in place and leaving them untouched"
+    warn "    $PLUGIN_DST contains files not installed by VMaker; updating our files and leaving them untouched"
     copy_plugin_files
     ;;
-  replace)
-    run rm -rf "$PLUGIN_DST"
+  install)
     copy_plugin_files
     ;;
   refuse)

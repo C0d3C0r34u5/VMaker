@@ -60,16 +60,20 @@ The script is idempotent, so running it again is safe:
 
 It is also careful never to destroy something it didn't create:
 
-- `~/.local/bin/vmaker` is only overwritten if the existing file is the
-  VMaker script. A same-named unrelated executable, a non-regular file, or a
-  symlink is left alone, and the install stops with an explanatory error so
-  you can move it aside first.
-- `~/.config/omarchy/plugins/vmaker.vms` is only replaced wholesale if it
-  contains nothing but VMaker's own files. If you have added your own files
-  there, the plugin's files are updated in place and your files are left
-  untouched.
-- The plugin directory is never deleted if it is a symlink or not owned by
-  you.
+- `~/.local/bin/vmaker` is only overwritten when the existing file is
+  byte-identical to the bundled script, or its SHA-256 matches a known VMaker
+  release (the installer carries the hashes of past releases, so upgrades work).
+  A same-named unrelated executable, a non-regular file, a symlink, or a file
+  owned by another account is left alone and the install stops with an
+  explanatory error so you can move it aside first. Matching on content hash
+  means a foreign file that merely contains VMaker-looking text is still
+  refused.
+- `~/.config/omarchy/plugins/vmaker.vms` is **never removed**. Only VMaker's own
+  files are updated in place; any file you added anywhere in the directory —
+  including inside `lib/` or `tests/` — is preserved.
+- Before overwriting a managed path, the installer checks that it is a
+  target-owned regular file or directory. A symlink or foreign-owned entry at a
+  managed path stops the install instead of being written through.
 
 After it finishes, log out and back in.
 
@@ -112,8 +116,9 @@ seven things:
    **not** change the global forward policy or open all inbound traffic.
 5. Adds your user to the `libvirt` and `kvm` groups
 6. Creates `~/Myvms` and grants the qemu process access to it (POSIX ACLs)
-7. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell
-   (refusing to overwrite anything it didn't create — see above)
+7. Installs `vmaker` to `~/.local/bin` and `vmaker.vms` into the shell. It
+   refuses to overwrite anything it can't verify as its own (by content hash)
+   and preserves any files you added to the plugin directory — see above
 
 ## Creating a VM
 
