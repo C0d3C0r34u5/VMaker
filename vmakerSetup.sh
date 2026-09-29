@@ -269,16 +269,16 @@ elif [[ -e "$BIN_DST" ]]; then
   elif cmp -s "$SCRIPT_DIR/vmaker" "$BIN_DST"; then
     BIN_MODE="uptodate"
   else
-    BIN_SHA="$(sha256sum "$BIN_DST" | awk '{print $1}')"
+    BIN_SHA="$(sha256sum "$BIN_DST" 2>/dev/null | awk '{print $1}')" || true
     BIN_KNOWN=0
     for h in "${VMAKER_KNOWN_SHA256[@]}"; do
-      [[ "$h" == "$BIN_SHA" ]] && { BIN_KNOWN=1; break; }
+      [[ -n "$BIN_SHA" && "$h" == "$BIN_SHA" ]] && { BIN_KNOWN=1; break; }
     done
     if [[ $BIN_KNOWN -eq 1 ]]; then
       BIN_MODE="upgrade"
     else
       BIN_MODE="refuse"
-      conflict "$BIN_DST is not a known VMaker release (sha256 $BIN_SHA); refusing to overwrite it — move it aside first"
+      conflict "$BIN_DST is not a known VMaker release (sha256 ${BIN_SHA:-unreadable}); refusing to overwrite it — move it aside first"
     fi
   fi
 fi
@@ -308,10 +308,21 @@ elif [[ -L "$PLUGIN_DST" ]]; then
   PLUGIN_MODE="refuse"
   conflict "$PLUGIN_DST is a symbolic link; refusing to write into it"
 elif [[ -e "$PLUGIN_DST" ]]; then
-  PLUGIN_OWNER="$(stat -c %u "$PLUGIN_DST" 2>/dev/null || true)"
-  if [[ "$PLUGIN_OWNER" != "$TARGET_UID" ]]; then
+  if [[ ! -d "$PLUGIN_DST" ]]; then
     PLUGIN_MODE="refuse"
-    conflict "$PLUGIN_DST is owned by uid ${PLUGIN_OWNER:-?}, not '$TARGET_USER'; refusing to write into it"
+    conflict "$PLUGIN_DST is not a directory; refusing to write into it"
+  else
+    PLUGIN_OWNER="$(stat -c %u "$PLUGIN_DST" 2>/dev/null || true)"
+    if [[ "$PLUGIN_OWNER" != "$TARGET_UID" ]]; then
+      PLUGIN_MODE="refuse"
+      conflict "$PLUGIN_DST is owned by uid ${PLUGIN_OWNER:-?}, not '$TARGET_USER'; refusing to write into it"
+    elif [[ ! -r "$PLUGIN_DST" || ! -x "$PLUGIN_DST" ]]; then
+      PLUGIN_MODE="refuse"
+      conflict "$PLUGIN_DST is not readable/traversable; refusing to write into it"
+    elif [[ ! -w "$PLUGIN_DST" ]]; then
+      PLUGIN_MODE="refuse"
+      conflict "$PLUGIN_DST is not writable by '$TARGET_USER'; refusing to write into it"
+    fi
   fi
 fi
 
