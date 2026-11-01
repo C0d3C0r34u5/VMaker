@@ -9,6 +9,17 @@ function parse(text) {
 // Empty output (header + separator only).
 assert.deepStrictEqual(parse(" Id   Name   State\n--------------------\n\n"), []);
 
+// Only shut-off VMs — list should not be wiped even when nothing is running.
+const allOff = " Id   Name   State\n--------------------\n -    bar    shut off\n -    baz    shut off\n";
+const allOffParsed = parse(allOff);
+assert.strictEqual(allOffParsed.length, 2);
+assert.strictEqual(allOffParsed[0].name, "bar");
+assert.strictEqual(allOffParsed[0].state, "shut off");
+assert.strictEqual(allOffParsed[0].on, false);
+assert.strictEqual(allOffParsed[1].name, "baz");
+assert.strictEqual(allOffParsed[1].state, "shut off");
+assert.strictEqual(allOffParsed[1].on, false);
+
 // A running VM and a shut-off VM.
 const basic = " Id   Name   State\n--------------------\n 1    foo    running\n -    bar    shut off\n";
 const parsed = parse(basic);

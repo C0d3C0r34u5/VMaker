@@ -60,6 +60,12 @@ BarWidget {
       return "ok"
     }
 
+    function hardRefresh(): string {
+      if (!root.service) return "unavailable"
+      root.service.forceRefresh()
+      return "ok"
+    }
+
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
@@ -82,7 +88,10 @@ BarWidget {
     activeColor: Color.accent
     onPressed: function(b) {
       if (b === Qt.MiddleButton) {
-        if (root.service) root.service.refresh()
+        if (root.service) {
+          if (root.service.busy) root.service.forceRefresh()
+          else root.service.refresh()
+        }
         return
       }
       root.togglePanel()

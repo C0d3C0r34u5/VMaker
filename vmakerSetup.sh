@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Does everything needed to create and manage QEMU/KVM VMs on Arch/Omarchy:
 #   1. Installs QEMU, libvirt, and their dependencies (pacman, via sudo)
-#   2. Enables and starts libvirtd and the default NAT network
+#   2. Enables the libvirt modular daemons and the default NAT network
 #   3. Adds the current user to the libvirt and kvm groups
 #   4. Adds scoped UFW rules so VMs can reach the internet (NAT forwarding on
 #      the libvirt bridge + DHCP/DNS to dnsmasq)
@@ -107,9 +107,19 @@ for qu in libvirt-qemu qemu; do
   getent passwd "$qu" >/dev/null 2>&1 && QEMU_USERS+=("$qu")
 done
 
+# Switching from the monolithic libvirtd to the modular daemons leaves domains
+# started by the old daemon unmanaged. Refuse to do that behind the user's back.
+if command -v virsh >/dev/null 2>&1 \
+   && systemctl is-active --quiet libvirtd.service 2>/dev/null; then
+  RUNNING_VMS="$(virsh -c qemu:///system list --state-running --name 2>/dev/null | grep -c . || true)"
+  if [[ "${RUNNING_VMS:-0}" -gt 0 ]]; then
+    err "$RUNNING_VMS VM(s) are running under the legacy libvirtd. Shut them down (or stop them in virt-manager) before running this installer, which switches libvirt to the modular daemons."
+  fi
+fi
+
 # ---------- progress ----------
 info "1/7  Installing packages..."
-info "2/7  Enabling and starting libvirtd..."
+info "2/7  Enabling the libvirt daemons..."
 info "3/7  Starting the default NAT network..."
 if [[ $UFW_ACTIVE -eq 1 ]]; then
   info "4/7  Adding scoped UFW rules for libvirt NAT networking..."
@@ -126,7 +136,12 @@ info "6/7  Setting up $MYVMS..."
 # ---------- privileged steps (single sudo) ----------
 if [[ $DRY_RUN -eq 1 ]]; then
   run sudo pacman -S --needed --noconfirm "${PACKAGES[@]}"
-  run sudo systemctl enable --now libvirtd
+  run sudo systemctl disable --now libvirtd.service libvirtd.socket \
+      libvirtd-ro.socket libvirtd-admin.socket
+  run sudo systemctl enable --now virtqemud.socket virtnetworkd.socket \
+      virtstoraged.socket virtnodedevd.socket virtnwfilterd.socket \
+      virtsecretd.socket virtinterfaced.socket virtlogd.socket virtlockd.socket
+  run sudo pkill -f '/var/lib/libvirt/dnsmasq/default.conf'
   run sudo virsh -c qemu:///system net-start default
   run sudo virsh -c qemu:///system net-autostart default
   if [[ $UFW_ACTIVE -eq 1 ]]; then
@@ -161,12 +176,37 @@ MYVMS="$TARGET_HOME/Myvms"
 pacman -S --needed --noconfirm qemu-desktop libvirt virt-install virt-manager \
   virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo acl
 
-# 2. libvirtd
-systemctl enable --now libvirtd
+# 2. libvirt daemons
+# The legacy monolithic libvirtd and the modular daemons conflict: e.g.
+# virtqemud.service has Conflicts=libvirtd.service. Leaving both enabled makes
+# boot nondeterministic, and if virtqemud wins while virtnetworkd is disabled
+# the 'default' network never exists, so every VM fails to start with
+# "Failed to connect socket to '/var/run/libvirt/virtnetworkd-sock'".
+# Standardize on the modular daemons (the default model on current Arch).
+systemctl disable --now libvirtd.service libvirtd.socket \
+  libvirtd-ro.socket libvirtd-admin.socket 2>/dev/null || true
+
+systemctl enable --now \
+  virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+  virtnodedevd.socket virtnwfilterd.socket virtsecretd.socket \
+  virtinterfaced.socket virtlogd.socket virtlockd.socket
+
+# A dnsmasq orphaned by a stopped monolithic daemon keeps holding the bridge's
+# DHCP/DNS ports, which stops virtnetworkd from starting the network.
+# Capture first: `virsh | grep -q` can trip `pipefail` when grep exits early.
+DEFAULT_NET_INFO="$(virsh -c qemu:///system net-info default 2>/dev/null || true)"
+if ! grep -q 'Active:.*yes' <<<"$DEFAULT_NET_INFO"; then
+  pkill -f '/var/lib/libvirt/dnsmasq/default.conf' 2>/dev/null || true
+fi
 
 # 3. default NAT network
-virsh -c qemu:///system net-start default || true
+virsh -c qemu:///system net-start default 2>/dev/null || true
 virsh -c qemu:///system net-autostart default
+DEFAULT_NET_INFO="$(virsh -c qemu:///system net-info default 2>/dev/null || true)"
+if ! grep -q 'Active:.*yes' <<<"$DEFAULT_NET_INFO"; then
+  echo "warning: the libvirt 'default' network is not active" >&2
+  echo "         diagnose with: journalctl -u virtnetworkd -b" >&2
+fi
 
 # 4. scoped UFW rules
 if [[ "$UFW_ACTIVE" == "1" ]]; then
@@ -216,6 +256,9 @@ PLUGIN_FILES=(manifest.json BarWidget.qml Panel.qml Service.qml lib tests)
 VMAKER_KNOWN_SHA256=(
   76400895a194718e7878a83daa13915678d09e86daf3efbb0e026b279185396a  # initial release
   f0863f0ed3185056061a70ea6ed96f7565f144eb32cfbde5355bbd8105705de5  # virt-viewer auto-open
+  a94e8ec8adb57647e3a3549cef431f02c7ccad576c7113c0c76caebdd905bba5  # RAM default + OVMF validation
+  b0912b874b13f6955b39568ff232c7ade994ecf85e218054fa39f28dec53a6f3  # ISO validation + graphics fallback
+  fb816e759162c589139b766db87f23689e720474e6c257c5b524394a6a0d480b  # force system python for virt-install (gi)
 )
 
 # Relative paths (files and directories) that belong to the plugin, mapping to

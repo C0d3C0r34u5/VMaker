@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# virt-install is a Python program whose shebang is `#!/usr/bin/env python3`.
+# A version manager on PATH (mise, pyenv, ...) can shadow /usr/bin/python3 with
+# a build that lacks python-gobject (gi), which makes virt-install fail with
+# ModuleNotFoundError. Force the system interpreter/binaries to take precedence
+# so the tools we depend on run under the Python they were built against.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+
+# Fail fast with a clear message instead of a Python traceback if gi is missing.
+if ! /usr/bin/python3 -c 'import gi' >/dev/null 2>&1; then
+  echo "error: python-gobject (gi) is not importable by /usr/bin/python3 - install the 'python-gobject' package" >&2
+  exit 1
+fi
+
 # vmaker - interactive VM creation helper for QEMU/KVM + libvirt
 # VMs are stored under ~/Myvms/<name>/
 
@@ -44,8 +57,28 @@ command -v virt-install >/dev/null 2>&1 || err "virt-install not found — insta
 command -v osinfo-query >/dev/null 2>&1 || err "osinfo-query not found — install libosinfo"
 command -v qemu-system-x86_64 >/dev/null 2>&1 || err "qemu-system-x86_64 not found — install qemu"
 
+# Probe for spice graphics support; fall back to vnc if unavailable.
+GRAPHICS="spice"
+if ! qemu-system-x86_64 -display help 2>/dev/null | grep -qw spice; then
+  GRAPHICS="vnc"
+  info "spice graphics not available — using vnc"
+fi
+
 if ! virsh -c qemu:///system connect >/dev/null 2>&1; then
   err "can't connect to libvirt (qemu:///system). Have you logged out/in since being added to the 'libvirt' group?"
+fi
+
+# vmaker always attaches VMs to the 'default' NAT network. If the network driver
+# (virtnetworkd on modular installs, libvirtd on legacy ones) is not running,
+# virt-install happily creates a VM that can never boot. Fail before asking
+# questions so the problem and its fix are obvious.
+# Capture first: `virsh | grep -q` can trip `pipefail` when grep exits early.
+DEFAULT_NET_INFO="$(virsh -c qemu:///system net-info default 2>/dev/null || true)"
+if ! grep -q 'Active:.*yes' <<<"$DEFAULT_NET_INFO"; then
+  err "the libvirt 'default' network is not active, so the new VM could not boot.
+  Start it with:
+    sudo systemctl enable --now virtnetworkd.socket
+    sudo virsh -c qemu:///system net-start default"
 fi
 
 # ---------- curated OS lists ----------
@@ -109,6 +142,11 @@ DEF_NAME="$(printf '%s' "$OS_NAME" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9'
 NAME="$(ask_str "Step 2: VM name" "${DEF_NAME:-vm}")"
 NAME="$(printf '%s' "$NAME" | tr -c 'a-zA-Z0-9._-' '-' | sed 's/-\+/-/g;s/^-//;s/-$//')"
 [ -n "$NAME" ] || err "VM name can't be empty"
+# The sanitizer above maps most junk to '-', but it leaves dots alone. Reject a
+# name that starts with '.', especially '.' and '..', which would make $VMDIR
+# escape $VMROOT and point rm -rf at a parent directory.
+[[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || err "VM name must start with a letter or digit and may only contain letters, digits, '.', '_' or '-'"
 virsh -c qemu:///system dominfo "$NAME" >/dev/null 2>&1 && err "a VM named '$NAME' already exists"
 
 # 3. ISO
@@ -118,8 +156,12 @@ while true; do
   ISO="$(ask_str "Path to ISO (or drag file here)" "")"
   ISO="${ISO/#\~/$HOME}"
   ISO="$(printf '%s' "$ISO" | sed "s/^['\"]//;s/['\"]$//")"
-  [ -f "$ISO" ] && break
-  echo "  (not found: $ISO)" >&2
+  [ -f "$ISO" ] || { echo "  (not found: $ISO)" >&2; continue; }
+  MIME="$(file --mime-type -b "$ISO" 2>/dev/null || true)"
+  case "$MIME" in
+    application/x-iso9660-image|application/octet-stream) break ;;
+    *) echo "  (not an ISO file: $MIME — $ISO)" >&2 ;;
+  esac
 done
 
 # 4. CPU cores
@@ -130,6 +172,8 @@ CORES="$(ask_int "Step 4: CPU cores" "$(( $(nproc) / 2 ))" 1 "$(nproc)")"
 TOTAL_GB="$(awk '/MemTotal/{printf "%.0f", $2/1024/1024}' /proc/meminfo)"
 DEF_RAM="$(( TOTAL_GB / 4 ))"
 [ "$DEF_RAM" -lt 2 ] && DEF_RAM=2
+[ "$DEF_RAM" -gt "$TOTAL_GB" ] && DEF_RAM="$TOTAL_GB"
+[ "$DEF_RAM" -lt 1 ] && DEF_RAM=1
 echo ""
 RAM_GB="$(ask_int "Step 5: RAM in GB" "$DEF_RAM" 1 "$TOTAL_GB")"
 RAM_MIB="$(( RAM_GB * 1024 ))"
@@ -141,7 +185,12 @@ DISK_GB="$(ask_int "Step 6: disk size in GB" "20" 1 "")"
 # ---------- build VM config ----------
 VMDIR="$VMROOT/$NAME"
 DISK="$VMDIR/$NAME.qcow2"
-mkdir -p "$VMDIR"
+# Never touch a directory we did not create in this run: `virsh undefine`
+# keeps disks by default, and the cleanup path below removes $VMDIR when
+# virt-install fails.
+if [ -e "$VMDIR" ]; then
+  err "refusing to reuse existing path $VMDIR — move it aside or choose another VM name"
+fi
 
 if [ "$OS_TYPE" = "windows" ]; then
   DISK_BUS="sata"
@@ -163,7 +212,7 @@ ARGS=(
   --disk "path=$DISK,format=qcow2,bus=$DISK_BUS,size=$DISK_GB"
   --cdrom "$ISO"
   --network "network=default,model=$NET_MODEL"
-  --graphics spice
+  --graphics "$GRAPHICS"
   --video "$VIDEO"
 )
 
@@ -176,8 +225,12 @@ fi
 if [ "$OS_TYPE" = "windows" ]; then
   if [ "$OS_VARIANT" = "win11" ] || [ "$OS_VARIANT" = "win2k25" ]; then
     # Windows 11 / Server 2025 want Secure Boot + TPM 2.0
+    OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd"
+    OVMF_VARS="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
+    [ -f "$OVMF_CODE" ] || err "OVMF secure boot code not found at $OVMF_CODE — install edk2-ovmf"
+    [ -f "$OVMF_VARS" ] || err "OVMF vars template not found at $OVMF_VARS — install edk2-ovmf"
     ARGS+=(--machine q35)
-    ARGS+=(--boot loader=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd,nvram.template=/usr/share/edk2/x64/OVMF_VARS.4m.fd)
+    ARGS+=(--boot loader="$OVMF_CODE,nvram.template=$OVMF_VARS")
     ARGS+=(--features smm.state=on)
     ARGS+=(--tpm backend.type=emulator,backend.version=2.0,model=tpm-crb)
   else
@@ -204,15 +257,19 @@ if ! confirm "Create this VM?"; then
 fi
 
 info "Creating VM '$NAME' ..."
-virt-install --connect qemu:///system "${ARGS[@]}"
+mkdir -p "$VMDIR"
+if ! virt-install --connect qemu:///system "${ARGS[@]}"; then
+  rm -rf "$VMDIR"
+  err "virt-install failed — VM '$NAME' was not created"
+fi
 
 info "VM '$NAME' created. Start it anytime with:"
-echo "    virsh start $NAME"
-echo "    virsh shutdown $NAME   (graceful)"
-echo "    virsh destroy $NAME    (force)"
+echo "    virsh -c qemu:///system start $NAME"
+echo "    virsh -c qemu:///system shutdown $NAME   (graceful)"
+echo "    virsh -c qemu:///system destroy $NAME    (force)"
 echo ""
 echo "To install the OS now, open virt-manager (double-click the VM) or run:"
-echo "    virt-viewer $NAME"
+echo "    virt-viewer -c qemu:///system $NAME"
 if [ "$OS_TYPE" = "windows" ]; then
   echo ""
   echo "Windows note: after install, install the virtio-win guest tools for best"

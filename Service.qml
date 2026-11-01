@@ -23,6 +23,9 @@ Item {
   property bool busy: false
   property bool virshMissing: false
   property double lastUpdatedAt: 0
+  property double lastRefreshAt: 0
+  property bool pendingRefresh: false
+  property double busySince: 0
 
   readonly property int totalCount: vms.length
 
@@ -60,6 +63,7 @@ Item {
 
   function runAction(kind, name) {
     if (root.actionBusy) return false
+    if (root.busy) return false
     if (kind !== "start" && kind !== "shutdown" && kind !== "destroy") return false
     root.actionKind = kind
     root.actionVm = String(name)
@@ -67,6 +71,7 @@ Item {
     actionProc.exitCode = -1
     actionProc.stdoutDone = false
     actionProc.stdoutText = ""
+    actionProc.command = []
     actionProc.command = [Vms.VIRSH_BINARY, "-c", Vms.VIRSH_URI, kind, String(name)]
     actionProc.running = true
     actionWatchdog.restart()
@@ -76,11 +81,63 @@ Item {
   // ------------------------------------------------------------ refresh
 
   function refresh() {
-    if (root.busy) return
+    if (root.busy) { root.pendingRefresh = true; return }
+    if (root.actionBusy) { root.pendingRefresh = true; return }
+    // A queued refresh bypasses the debounce; it's an explicit user request.
+    if (!root.pendingRefresh && Date.now() - root.lastRefreshAt < 500) return
+    root.lastRefreshAt = Date.now()
+    root.pendingRefresh = false
     root.busy = true
+    root.busySince = Date.now()
     root.status = "loading"
     root.error = ""
     preflightProc.running = true
+    preflightWatchdog.restart()
+  }
+
+  // Force a full refresh even if state appears stuck. Stops all watchdogs,
+  // resets busy/action flags, clears errors, and runs the complete refresh
+  // pipeline. Intended for manual recovery when the service is wedged.
+  function forceRefresh() {
+    listWatchdog.stop()
+    listStuckTimer.stop()
+    listStdoutFallback.stop()
+    actionWatchdog.stop()
+    actionStuckTimer.stop()
+    viewerProbeWatchdog.stop()
+    viewerPreflightWatchdog.stop()
+    // Only kill processes that are actually still running; a stale one can
+    // keep busy set forever.
+    if (preflightProc.running) preflightProc.running = false
+    if (listProc.running) listProc.running = false
+    if (actionProc.running) actionProc.running = false
+    if (viewerProbe.running) viewerProbe.running = false
+    if (viewerPreflight.running) viewerPreflight.running = false
+    if (viewerProc.running) viewerProc.running = false
+    root.busy = false
+    root.busySince = 0
+    root.actionKind = ""
+    root.actionVm = ""
+    root.actionError = ""
+    root.status = "loading"
+    root.error = ""
+    root.lastRefreshAt = 0
+    root.pendingRefresh = false
+    preflightProc.running = true
+    preflightWatchdog.restart()
+  }
+
+  // Recover when preflightProc hangs: virsh can't be probed, so the refresh
+  // pipeline can't start. Kill the probe, clear busy, and mark an error so the
+  // panel stays usable instead of dead.
+  function recoverStuckPreflight() {
+    if (!root.busy) return
+    preflightProc.running = false
+    root.busy = false
+    root.busySince = 0
+    root.status = "error"
+    root.error = "virsh preflight timed out"
+    if (root.pendingRefresh) { root.pendingRefresh = false; root.refresh() }
   }
 
   // ------------------------------------------------------------ preflight
@@ -93,6 +150,9 @@ Item {
     command: ["/usr/bin/test", "-x", Vms.VIRSH_BINARY]
 
     onExited: function(code) {
+      preflightWatchdog.stop()
+      // The watchdog may have already recovered (cleared busy); don't double-handle.
+      if (!root.busy) return
       if (code !== 0) {
         root.virshMissing = true
         root.busy = false
@@ -105,12 +165,24 @@ Item {
     }
   }
 
+  Timer {
+    id: preflightWatchdog
+    interval: 5000
+    repeat: false
+    onTriggered: root.recoverStuckPreflight()
+  }
+
   function startList() {
     listProc.exitCode = -1
     listProc.stdoutDone = false
     listProc.stdoutText = ""
+    // Clear then re-set command to force Quickshell to re-execute even when
+    // the virsh command string is identical to the previous run.
+    listProc.command = []
+    listProc.command = [Vms.VIRSH_BINARY, "-c", Vms.VIRSH_URI, "list", "--all"]
     listProc.running = true
     listWatchdog.restart()
+    listStdoutFallback.start()
   }
 
   // ------------------------------------------------------------ list process
@@ -139,7 +211,8 @@ Item {
     onRunningChanged: {
       if (running) return
       if (!root.busy) return
-      Qt.callLater(root.recoverStuckList)
+      if (listProc.exitCode !== -1) return
+      listStuckTimer.restart()
     }
   }
 
@@ -150,13 +223,64 @@ Item {
     onTriggered: listProc.running = false
   }
 
+  // Guards against the onRunningChanged / onExited ordering race: if the
+  // process exits right as onRunningChanged fires, Qt.callLater could run
+  // recoverStuckList after finishList already handled completion.
+  Timer {
+    id: listStuckTimer
+    interval: 50
+    repeat: false
+    onTriggered: root.recoverStuckList()
+  }
+
+  // Safety net: busy must never stay true when no process is actually running.
+  // If it does (e.g. a missed onExited / onStreamFinished), force-reset so the
+  // panel stays refreshable. Auto-retries once via pendingRefresh.
+  Timer {
+    id: busyWatchdog
+    interval: 1000
+    repeat: true
+    running: true
+    onTriggered: {
+      if (!root.busy) { root.busySince = 0; return }
+      if (root.busySince === 0) root.busySince = Date.now()
+      if (Date.now() - root.busySince > 12000 &&
+          !preflightProc.running && !listProc.running && !actionProc.running &&
+          !viewerProbe.running && !viewerPreflight.running && !viewerProc.running) {
+        root.busy = false
+        root.busySince = 0
+        root.status = "error"
+        root.error = "VM service refresh stuck — auto-reset"
+        root.pendingRefresh = true
+        root.refresh()
+      }
+    }
+  }
+
+  // Fallback: if virsh exits but its stdout never finishes, don't leave busy
+  // set forever. Finish with whatever output we have (possibly empty).
+  Timer {
+    id: listStdoutFallback
+    interval: 1000
+    repeat: false
+    onTriggered: {
+      if (root.busy && listProc.exitCode !== -1 && !listProc.stdoutDone) {
+        listProc.stdoutDone = true
+        root.finishList()
+      }
+    }
+  }
+
   function recoverStuckList() {
     if (!root.busy) return
     if (listProc.exitCode !== -1) return
     listWatchdog.stop()
+    listStdoutFallback.stop()
     root.busy = false
+    root.busySince = 0
     root.status = "error"
     root.error = "virsh timed out"
+    if (root.pendingRefresh) { root.pendingRefresh = false; root.refresh() }
   }
 
   function finishList() {
@@ -164,16 +288,31 @@ Item {
     if (listProc.exitCode === -1) return
     if (!listProc.stdoutDone) return
     listWatchdog.stop()
+    listStdoutFallback.stop()
     root.busy = false
+    var output = String(listProc.stdoutText || "").trim()
     if (listProc.exitCode === 0) {
-      root.vms = Vms.parseList(listProc.stdoutText)
-      root.status = "ok"
-      root.error = ""
-      root.lastUpdatedAt = Date.now()
+      var parsed = Vms.parseList(output)
+      // Only trust an empty result if the output looks like valid virsh output
+      // (contains the header). Otherwise keep the last known-good list so a
+      // flaky post-action virsh run can't wipe all VMs from the panel.
+      if (parsed.length > 0 || output.indexOf("Id") !== -1) {
+        root.vms = parsed
+        root.status = "ok"
+        root.error = ""
+        root.lastUpdatedAt = Date.now()
+      } else {
+        root.status = "error"
+        root.error = "virsh returned unexpected output"
+      }
     } else {
+      // Keep the last known-good list instead of wiping it on flaky output.
       root.status = "error"
-      root.error = Vms.describeListError(listProc.exitCode)
+      root.error = listProc.exitCode === 0
+        ? "virsh returned no output"
+        : Vms.describeListError(listProc.exitCode)
     }
+    if (root.pendingRefresh) { root.pendingRefresh = false; root.refresh() }
   }
 
   // ------------------------------------------------------------ action process
@@ -202,7 +341,8 @@ Item {
     onRunningChanged: {
       if (running) return
       if (!root.actionBusy) return
-      Qt.callLater(root.recoverStuckAction)
+      if (actionProc.exitCode !== -1) return
+      actionStuckTimer.restart()
     }
   }
 
@@ -211,6 +351,16 @@ Item {
     interval: Vms.ACTION_TIMEOUT_MS
     repeat: false
     onTriggered: actionProc.running = false
+  }
+
+  // Guards against the onRunningChanged / onExited ordering race: if the
+  // process exits right as onRunningChanged fires, Qt.callLater could run
+  // recoverStuckAction after finishAction already handled completion.
+  Timer {
+    id: actionStuckTimer
+    interval: 50
+    repeat: false
+    onTriggered: root.recoverStuckAction()
   }
 
   function recoverStuckAction() {
@@ -252,6 +402,7 @@ Item {
     viewerProbe.vm = String(name)
     viewerProbe.command = [Vms.VIRSH_BINARY, "-c", Vms.VIRSH_URI, "domdisplay", String(name)]
     viewerProbe.running = true
+    viewerProbeWatchdog.restart()
   }
 
   // Ask libvirt which display a running domain exposes (spice://..., vnc://...).
@@ -279,7 +430,42 @@ Item {
     }
   }
 
+  Timer {
+    id: viewerProbeWatchdog
+    interval: Vms.LIST_TIMEOUT_MS
+    repeat: false
+    onTriggered: viewerProbe.running = false
+  }
+
+  Process {
+    id: viewerPreflight
+    property string vm: ""
+    command: []
+
+    onExited: function(code) {
+      viewerPreflightWatchdog.stop()
+      var name = viewerPreflight.vm
+      viewerPreflight.vm = ""
+      if (code !== 0 || name === "") return
+      viewerProc.command = [Vms.VIRT_VIEWER_BINARY, "-c", Vms.VIRSH_URI, name]
+      viewerProc.running = true
+    }
+  }
+
+  Timer {
+    id: viewerPreflightWatchdog
+    interval: Vms.LIST_TIMEOUT_MS
+    repeat: false
+    onTriggered: viewerPreflight.running = false
+  }
+
+  Process {
+    id: viewerProc
+    command: []
+  }
+
   function finishViewerProbe() {
+    viewerProbeWatchdog.stop()
     if (viewerProbe.exitCode === -1) return
     if (!viewerProbe.stdoutDone) return
     var display = viewerProbe.stdoutText
@@ -289,25 +475,7 @@ Item {
     viewerPreflight.vm = name
     viewerPreflight.command = ["/usr/bin/test", "-x", Vms.VIRT_VIEWER_BINARY]
     viewerPreflight.running = true
-  }
-
-  Process {
-    id: viewerPreflight
-    property string vm: ""
-    command: []
-
-    onExited: function(code) {
-      var name = viewerPreflight.vm
-      viewerPreflight.vm = ""
-      if (code !== 0 || name === "") return
-      viewerProc.command = [Vms.VIRT_VIEWER_BINARY, "-c", Vms.VIRSH_URI, name]
-      viewerProc.running = true
-    }
-  }
-
-  Process {
-    id: viewerProc
-    command: []
+    viewerPreflightWatchdog.restart()
   }
 
   // ------------------------------------------------------------ scheduling

@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell.Io
 import qs.Ui
 import qs.Commons
 
@@ -15,6 +16,29 @@ Panel {
 
   readonly property var service: bar && bar.shell ? bar.shell.serviceFor("vmaker.vms") : null
 
+  // If the service hasn't appeared after a grace period, show a retry path
+  // instead of a blank panel. Happens after shell restarts or plugin rescan.
+  property bool serviceMissing: false
+  readonly property bool servicePending: root.service === null
+
+  Timer {
+    id: serviceMissingTimer
+    interval: 3000
+    repeat: false
+    running: root.service === null
+    onTriggered: root.serviceMissing = true
+  }
+
+  // Retry loading the service by asking the shell to rescan plugins.
+  function retryService() {
+    rescanProcess.running = true
+  }
+
+  Process {
+    id: rescanProcess
+    command: ["bash", "-c", "omarchy-shell shell rescanPlugins"]
+  }
+
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(root.contentForeground, 1.4)
@@ -30,7 +54,7 @@ Panel {
     root.cursor = root.cursorCount - 1
 
   readonly property string statusLabel: {
-    if (!root.service) return "Loading"
+    if (!root.service) return root.serviceMissing ? "Service not loaded" : "Loading"
     if (root.service.status === "error") return "Unavailable"
     if (root.service.totalCount === 0) return "No VMs"
     return root.service.onCount + " of " + root.service.totalCount + " running"
@@ -86,6 +110,7 @@ Panel {
 
     width: parent ? parent.width : 0
     implicitHeight: Math.max(nameText.implicitHeight, stateText.implicitHeight) + Style.space(6) * 2
+    height: implicitHeight
     radius: Style.cornerRadius
     color: row.hot ? Style.hoverFillFor(root.contentForeground, root.onColor) : "transparent"
     borderSpec: row.hot
@@ -119,8 +144,8 @@ Panel {
     Text {
       id: stateText
       textFormat: Text.PlainText
-      anchors.right: actionGroup.left
-      anchors.rightMargin: Style.space(8)
+      anchors.right: startBtn.left
+      anchors.rightMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
       text: String(row.vm.state || "")
       color: root.stateColor(row.vm)
@@ -128,30 +153,32 @@ Panel {
       font.pixelSize: Style.font.bodySmall
     }
 
-    Row {
-      id: actionGroup
+    PanelActionButton {
+      id: forceBtn
+      visible: row.vm.on
       anchors.right: parent.right
       anchors.rightMargin: Style.space(6)
       anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(4)
+      iconText: "\u2715"
+      fontSize: Style.font.bodySmall
+      tooltipText: "Force stop " + row.vm.name
+      foreground: root.contentForeground
+      hoverColor: root.warnColor
+      enabled: root.service ? !root.service.actionBusy : false
+      onClicked: root.forceVm(row.vm)
+    }
 
-      PanelActionButton {
-        iconText: row.vm.on ? "\uF0425" : "\uF040A"
-        tooltipText: row.vm.on ? "Shut down " + row.vm.name : "Start " + row.vm.name
-        foreground: root.contentForeground
-        enabled: root.service ? !root.service.actionBusy : false
-        onClicked: root.activateVm(row.vm)
-      }
-
-      PanelActionButton {
-        visible: row.vm.on
-        iconText: "\uF0156"
-        tooltipText: "Force stop " + row.vm.name
-        foreground: root.contentForeground
-        hoverColor: root.warnColor
-        enabled: root.service ? !root.service.actionBusy : false
-        onClicked: root.forceVm(row.vm)
-      }
+    PanelActionButton {
+      id: startBtn
+      anchors.right: forceBtn.visible ? forceBtn.left : parent.right
+      anchors.rightMargin: forceBtn.visible ? Style.space(4) : Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      iconText: row.vm.on ? "\u25A0" : "\u25B6"
+      fontSize: Style.font.bodySmall
+      tooltipText: row.vm.on ? "Shut down " + row.vm.name : "Start " + row.vm.name
+      foreground: root.contentForeground
+      enabled: root.service ? !root.service.actionBusy : false
+      onClicked: root.activateVm(row.vm)
     }
   }
 
@@ -221,11 +248,50 @@ Panel {
 
           PanelSeparator { foreground: root.contentForeground }
 
+          // Service not loaded: offer a retry path.
+          BorderSurface {
+            id: serviceMissingRow
+            visible: root.serviceMissing
+            width: parent.width
+            implicitHeight: Math.max(serviceMissingLabel.implicitHeight, Style.space(22)) + Style.space(6) * 2
+            radius: Style.cornerRadius
+            color: Style.hoverFillFor(root.contentForeground, root.warnColor)
+            borderSpec: Border.controlSpec("hover-cursor", root.contentForeground, root.warnColor)
+
+            Text {
+              id: serviceMissingLabel
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(8)
+              anchors.right: serviceMissingRetry.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "VM service not loaded"
+              color: root.warnColor
+              font.family: root.contentFontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+
+            PanelActionButton {
+              id: serviceMissingRetry
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\u21BB"
+              tooltipText: "Rescan plugins and reload service"
+              foreground: root.contentForeground
+              hoverColor: root.warnColor
+              onClicked: root.retryService()
+            }
+          }
+
           // Refresh row (cursor 0).
           BorderSurface {
             id: refreshRow
             width: parent.width
             implicitHeight: Math.max(refreshLabel.implicitHeight, Style.space(22)) + Style.space(6) * 2
+            height: implicitHeight
             radius: Style.cornerRadius
             readonly property bool hot: refreshMouse.containsMouse || root.cursor === 0
             color: hot ? Style.hoverFillFor(root.contentForeground, root.onColor) : "transparent"
@@ -240,6 +306,10 @@ Panel {
               cursorShape: Qt.PointingHandCursor
               onEntered: root.cursor = 0
               onClicked: if (root.service) root.service.refresh()
+              // Right-click: hard recovery when the service is wedged.
+              onPressed: function(mouse) {
+                if (mouse.button === Qt.RightButton && root.service) root.service.forceRefresh()
+              }
             }
 
             Text {
@@ -274,10 +344,10 @@ Panel {
               anchors.right: parent.right
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
-              iconText: "\uF0450"
-              tooltipText: "Re-read virsh"
+              iconText: "\u21BB"
+              tooltipText: root.service && root.service.busy ? "refresh queued" : "Re-read virsh"
               foreground: root.contentForeground
-              enabled: root.service ? !root.service.busy : false
+              enabled: root.service !== null
               onClicked: if (root.service) root.service.refresh()
             }
           }

@@ -30,10 +30,10 @@ cd VMaker
 ./vmakerSetup.sh
 ```
 
-This installs QEMU, libvirt, and their dependencies, enables `libvirtd`,
-starts the default NAT network, adds your user to the `libvirt` and `kvm`
-groups, installs `vmaker` to `~/.local/bin`, and installs + enables the
-`vmaker.vms` bar widget.
+This installs QEMU, libvirt, and their dependencies, enables the libvirt
+modular daemons (`virtqemud`, `virtnetworkd`, ...), starts the default NAT
+network, adds your user to the `libvirt` and `kvm` groups, installs `vmaker`
+to `~/.local/bin`, and installs + enables the `vmaker.vms` bar widget.
 
 When it finishes, **log out and back in** so the new group membership takes
 effect, then run `vmaker` to create your first VM.
@@ -54,7 +54,7 @@ cd VMaker
 The script is idempotent, so running it again is safe:
 
 - already-installed packages are skipped (`pacman --needed`)
-- `libvirtd` and the default network are just re-enabled
+- the libvirt daemons and the default network are just re-enabled
 - re-copying `vmaker.vms` over itself is harmless
 - your user is only added to the groups if missing
 
@@ -109,7 +109,10 @@ seven things:
 
 1. Installs packages: `qemu-desktop libvirt virt-install virt-manager
    virt-viewer edk2-ovmf dnsmasq swtpm iptables-nft libosinfo acl`
-2. `systemctl enable --now libvirtd`
+2. Enables the modular libvirt daemons (`virtqemud`, `virtnetworkd`,
+   `virtstoraged`, `virtnodedevd`, `virtnwfilterd`, `virtsecretd`,
+   `virtinterfaced`, `virtlogd`, `virtlockd`) and disables the legacy
+   monolithic `libvirtd` so the two models can't conflict
 3. Starts and autostarts the default NAT network (`virbr0`)
 4. Adds scoped UFW rules (if UFW is active): forwarding on `virbr0` plus
    DHCP (67/udp) and DNS (53/udp, 53/tcp) from the guest bridge. It does
@@ -134,10 +137,10 @@ TPM 2.0 automatically.
 Useful commands afterwards:
 
 ```bash
-virsh list --all       # see all VMs
-virsh start <name>     # start
-virsh shutdown <name>  # graceful stop
-virsh destroy <name>   # force stop
+virsh -c qemu:///system list --all   # see all VMs
+virsh -c qemu:///system start <name>     # start
+virsh -c qemu:///system shutdown <name>  # graceful stop
+virsh -c qemu:///system destroy <name>   # force stop
 virt-manager           # GUI
 virt-viewer <name>     # view a running VM
 ```
@@ -176,10 +179,14 @@ running VMs, then:
 omarchy plugin remove vmaker.vms --yes
 rm -f ~/.local/bin/vmaker
 
-# 2. Tear down the default libvirt network and disable libvirtd
+# 2. Tear down the default libvirt network and disable the libvirt daemons
 sudo virsh net-destroy default
 sudo virsh net-undefine default
-sudo systemctl disable --now libvirtd
+sudo systemctl disable --now virtqemud.socket virtnetworkd.socket \
+  virtstoraged.socket virtnodedevd.socket virtnwfilterd.socket \
+  virtsecretd.socket virtinterfaced.socket virtlogd.socket virtlockd.socket
+sudo systemctl disable --now libvirtd.service libvirtd.socket \
+  libvirtd-ro.socket libvirtd-admin.socket
 
 # 3. Remove the packages (skip if you want to keep QEMU/libvirt)
 sudo pacman -Rns qemu-desktop libvirt virt-install virt-manager virt-viewer \
@@ -213,6 +220,41 @@ rm -rf ~/Myvms
 > sudo sed -i 's/^DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
 > sudo ufw reload
 > ```
+
+## Troubleshooting
+
+### `Failed to connect socket to '/var/run/libvirt/virtnetworkd-sock'`
+
+The VM is defined but libvirt's network driver is not running, so the `default`
+network does not exist and the VM cannot boot. This happens when the legacy
+monolithic `libvirtd` was stopped (for example because `virtqemud`, which
+conflicts with it, was enabled) while its modular replacement `virtnetworkd`
+was never enabled.
+
+```bash
+# Clear a dnsmasq orphaned by the stopped libvirtd (it holds ports 53 and 67)
+sudo pkill -f 'dnsmasq.*/var/lib/libvirt/dnsmasq/default.conf'
+sudo systemctl enable --now virtnetworkd.socket
+sudo virsh -c qemu:///system net-start default
+sudo virsh -c qemu:///system net-autostart default
+```
+
+Re-running `./vmakerSetup.sh` performs the same repair.
+
+### `virsh list --all` shows nothing although the widget lists VMs
+
+`virsh` defaults to `qemu:///session`, while VMaker uses `qemu:///system`:
+
+```bash
+virsh -c qemu:///system list --all
+```
+
+To make the system connection the default in your shell, add this to
+`~/.bashrc` or `~/.zshrc`:
+
+```bash
+export LIBVIRT_DEFAULT_URI=qemu:///system
+```
 
 ## Notes
 
